@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+build/
+dist/
+*.egg-info/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.tox/
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# Project: never commit private samples or cleaned outputs
+samples/private/
+*.cleaned.*
+
+# Original user-supplied test image (kept out of public repo for copyright safety)
+samples/chatgpt_test.png
+
+# Local cache the GUI creates
+~/Library/Caches/imgclean/
