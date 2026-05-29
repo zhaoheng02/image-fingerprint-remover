@@ -26,12 +26,20 @@ type CleanResult = {
   output?: { is_clean: boolean; finding_count: number };
 };
 
+type Preview = {
+  name: string;
+  size: number;
+  url: string;
+};
+
 export default function DashboardPage() {
   const [sessionToken, setSessionToken] = useState("");
   const [me, setMe] = useState<Me | null>(null);
   const [files, setFiles] = useState<File[]>([]);
+  const [previews, setPreviews] = useState<Preview[]>([]);
   const [results, setResults] = useState<CleanResult[]>([]);
   const [message, setMessage] = useState("Loading account...");
+  const [mode, setMode] = useState("safe");
 
   useEffect(() => {
     if (!config.requireAuth) {
@@ -54,6 +62,18 @@ export default function DashboardPage() {
     });
   }, []);
 
+  useEffect(() => {
+    const nextPreviews = files.map((file) => ({
+      name: file.name,
+      size: file.size,
+      url: URL.createObjectURL(file)
+    }));
+    setPreviews(nextPreviews);
+    return () => {
+      nextPreviews.forEach((preview) => URL.revokeObjectURL(preview.url));
+    };
+  }, [files]);
+
   async function loadMe(token = sessionToken) {
     if (config.requireAuth && config.authProvider !== "wechat" && !token) return;
     const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
@@ -75,7 +95,7 @@ export default function DashboardPage() {
     if (config.requireAuth && config.authProvider !== "wechat" && !sessionToken) return;
     setMessage("Cleaning...");
     const body = new FormData();
-    body.set("mode", "safe");
+    body.set("mode", mode);
     files.forEach((file) => body.append("files", file));
     const headers = sessionToken ? { Authorization: `Bearer ${sessionToken}` } : undefined;
     const credentials: RequestCredentials = config.authProvider === "wechat" ? "include" : "same-origin";
@@ -123,6 +143,12 @@ export default function DashboardPage() {
     setMessage(dropped.length ? `${dropped.length} file(s) selected. Ready to clean.` : "Choose PNG/JPEG files.");
   }
 
+  function formatSize(value: number) {
+    if (value < 1024) return `${value} B`;
+    if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+    return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  }
+
   return (
     <main className="shell">
       <header className="wrap nav">
@@ -154,6 +180,23 @@ export default function DashboardPage() {
           </aside>
           <section className="tile">
             <h3>Clean images</h3>
+            <div className="mode-tabs" role="group" aria-label="Cleaning mode">
+              {[
+                ["safe", "Safe"],
+                ["paranoid", "Deep"],
+                ["nuclear", "Nuclear"],
+                ["watermark", "Watermark"]
+              ].map(([value, label]) => (
+                <button
+                  className={mode === value ? "active" : ""}
+                  key={value}
+                  type="button"
+                  onClick={() => setMode(value)}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
             <label
               className="upload-zone"
               onDragOver={(event) => event.preventDefault()}
@@ -170,6 +213,19 @@ export default function DashboardPage() {
                 setMessage((event.target.files?.length ?? 0) ? "Ready to clean." : "Choose PNG/JPEG files.");
               }} />
             </label>
+            {previews.length ? (
+              <div className="preview-strip">
+                {previews.map((preview) => (
+                  <article className="preview-thumb" key={`${preview.name}-${preview.url}`}>
+                    <img src={preview.url} alt={`${preview.name} preview`} />
+                    <div>
+                      <strong>{preview.name}</strong>
+                      <span>{formatSize(preview.size)} · Ready</span>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            ) : null}
             <button className="upload-button" type="button" onClick={cleanImages}>Run cleaner</button>
             <p className="message">{message}</p>
             <div className="result-list">

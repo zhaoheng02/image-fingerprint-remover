@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Chrome, LogIn, Zap } from "lucide-react";
 import Link from "next/link";
 import { browserSupabase } from "../../lib/supabase";
@@ -10,6 +10,23 @@ export default function LoginPage() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [message, setMessage] = useState("");
+  const [wechatReady, setWechatReady] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    if (config.authProvider !== "wechat") return;
+    fetch(`${config.apiBaseUrl}/api/auth/wechat/status`)
+      .then((response) => response.json())
+      .then((payload) => {
+        setWechatReady(Boolean(payload.configured));
+        if (!payload.configured) {
+          setMessage(`微信 OAuth 未配置：缺少 ${payload.missing.join(", ")}`);
+        }
+      })
+      .catch(() => {
+        setWechatReady(false);
+        setMessage("无法检查微信 OAuth 配置。");
+      });
+  }, []);
 
   async function signInWithPassword() {
     setMessage("Signing in...");
@@ -32,7 +49,17 @@ export default function LoginPage() {
     if (error) setMessage(error.message);
   }
 
-  function signInWithWechat() {
+  async function signInWithWechat() {
+    setMessage("检查微信 OAuth 配置...");
+    const statusResponse = await fetch(`${config.apiBaseUrl}/api/auth/wechat/status`);
+    const status = await statusResponse.json();
+    if (!status.configured) {
+      setWechatReady(false);
+      setMessage(`微信 OAuth 未配置：缺少 ${status.missing.join(", ")}`);
+      return;
+    }
+    setWechatReady(true);
+    setMessage("跳转到微信扫码登录...");
     const returnTo = `${window.location.origin}/dashboard`;
     window.location.href = `${config.apiBaseUrl}/api/auth/wechat/login?return_to=${encodeURIComponent(returnTo)}`;
   }
@@ -50,7 +77,7 @@ export default function LoginPage() {
           <h1>Login</h1>
           <p className="muted">{config.authProvider === "wechat" ? "使用微信扫码登录。" : "Use Supabase Auth. Google OAuth works after it is enabled in the Supabase dashboard."}</p>
           {config.authProvider === "wechat" ? (
-            <button type="button" onClick={signInWithWechat}>
+            <button type="button" onClick={signInWithWechat} disabled={wechatReady === false}>
               <LogIn size={17} /> 微信登录
             </button>
           ) : (

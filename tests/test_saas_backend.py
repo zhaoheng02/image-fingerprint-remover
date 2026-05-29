@@ -7,7 +7,7 @@ import struct
 import zlib
 
 from fastapi.testclient import TestClient
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from imgclean_web.billing import CheckoutSession
 from imgclean_web.app import create_app
@@ -33,6 +33,16 @@ def _make_dirty_png() -> bytes:
         b"parameters\x00prompt, seed: 123, Model hash: abcdef, Sampler: Euler",
     )
     return base[:insert_at] + marker + base[insert_at:]
+
+
+def _make_watermarked_png() -> bytes:
+    image = Image.new("RGB", (220, 120), color=(35, 75, 118))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((116, 82, 210, 108), fill=(14, 31, 50))
+    draw.text((124, 88), "WATERMARK", fill=(245, 248, 255))
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def _client(tmp_path, monkeypatch, credits="2"):
@@ -95,18 +105,20 @@ def test_clean_rejects_when_user_has_no_credits(tmp_path, monkeypatch):
     assert response.json()["detail"] == "Insufficient credits."
 
 
-def test_watermark_mode_requires_mask_or_box(tmp_path, monkeypatch):
+def test_watermark_mode_auto_detects_text_without_mask_or_box(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch, credits="2")
 
     response = client.post(
         "/api/clean",
         headers={"x-user-id": "user-watermark"},
         data={"mode": "watermark"},
-        files=[("files", ("dirty.png", _make_dirty_png(), "image/png"))],
+        files=[("files", ("watermarked.png", _make_watermarked_png(), "image/png"))],
     )
 
-    assert response.status_code == 400
-    assert "requires a mask image or box" in response.json()["detail"]
+    assert response.status_code == 200
+    result = response.json()["results"][0]
+    assert result["ok"] is True
+    assert result["download_filename"].endswith(".png")
 
 
 def test_watermark_mode_accepts_box_and_returns_download(tmp_path, monkeypatch):
@@ -311,6 +323,21 @@ def test_download_proxy_returns_attachment(tmp_path, monkeypatch):
     assert response.content == b"image-bytes"
     assert response.headers["content-type"] == "image/png"
     assert response.headers["content-disposition"] == 'attachment; filename="a.cleaned.png"'
+
+
+def test_wechat_auth_status_reports_configuration(tmp_path, monkeypatch):
+    for key in ("WECHAT_APP_ID", "WECHAT_APP_SECRET", "IMGCLEAN_SESSION_SECRET"):
+        monkeypatch.delenv(key, raising=False)
+    client = _client(tmp_path, monkeypatch)
+
+    response = client.get("/api/auth/wechat/status")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "provider": "wechat",
+        "configured": False,
+        "missing": ["WECHAT_APP_ID", "WECHAT_APP_SECRET", "IMGCLEAN_SESSION_SECRET"],
+    }
 
 
 def test_supabase_storage_uploads_and_returns_signed_url(monkeypatch):

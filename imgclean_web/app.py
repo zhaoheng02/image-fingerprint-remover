@@ -162,6 +162,21 @@ def create_app() -> FastAPI:
             "credits": account.credits,
         }
 
+    @app.get("/api/auth/wechat/status")
+    def wechat_status() -> dict[str, Any]:
+        missing = []
+        if not settings.wechat_app_id:
+            missing.append("WECHAT_APP_ID")
+        if not settings.wechat_app_secret:
+            missing.append("WECHAT_APP_SECRET")
+        if not settings.session_secret:
+            missing.append("IMGCLEAN_SESSION_SECRET")
+        return {
+            "provider": "wechat",
+            "configured": not missing,
+            "missing": missing,
+        }
+
     @app.post("/api/clean")
     async def clean_endpoint(
         request: Request,
@@ -867,6 +882,40 @@ def _render_index(settings: WebSettings) -> str:
       color: var(--muted);
       background: #fbfcfe;
     }}
+    .preview-grid {{
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 12px;
+    }}
+    .preview-card {{
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      overflow: hidden;
+      background: #ffffff;
+    }}
+    .preview-card img {{
+      display: block;
+      width: 100%;
+      aspect-ratio: 4 / 3;
+      object-fit: contain;
+      background: #eef2f7;
+    }}
+    .preview-meta {{
+      padding: 10px;
+      border-top: 1px solid var(--line);
+    }}
+    .preview-meta strong {{
+      display: block;
+      font-size: 13px;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }}
+    .preview-meta span {{
+      display: block;
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 12px;
+    }}
     .result {{
       border: 1px solid var(--line);
       border-radius: 8px;
@@ -993,7 +1042,7 @@ def _render_index(settings: WebSettings) -> str:
             <label class="mode"><input type="radio" name="mode" value="watermark">去水印<span>遮罩 / 区域</span></label>
           </div>
           <div class="watermark-options" id="watermark-options">
-            <p class="fineprint">第一版去水印需要指定区域。可填写像素区域 x,y,w,h，或上传黑白遮罩图，白色区域为水印。</p>
+            <p class="fineprint">默认会自动检测常见文字水印；效果不准时可填写像素区域 x,y,w,h，或上传黑白遮罩图，白色区域为水印。</p>
             <label for="watermark-box">水印区域</label>
             <input id="watermark-box" name="watermark_box" type="text" placeholder="例如：120,80,300,90">
             <label for="watermark-mask">水印遮罩图</label>
@@ -1023,14 +1072,13 @@ def _render_index(settings: WebSettings) -> str:
     const dropzone = document.getElementById('dropzone');
     const pickFiles = document.getElementById('pick-files');
     const watermarkOptions = document.getElementById('watermark-options');
+    let previewUrls = [];
 
     function updateFileLabel() {{
       const count = fileInput.files.length;
       fileTitle.textContent = count ? `${{count}} 张图片已选择` : '选择或拖入图片';
       fileSubtitle.textContent = count ? [...fileInput.files].map(f => f.name).join(' · ') : '可一次处理多张 PNG / JPEG';
-      results.className = 'empty';
-      results.textContent = count ? `已选择 ${{count}} 张图片，点击“开始处理”上传并清理。` : '等待选择图片';
-      summary.textContent = '';
+      renderSelectedPreviews();
     }}
 
     function selectedMode() {{
@@ -1045,6 +1093,46 @@ def _render_index(settings: WebSettings) -> str:
       if (value < 1024) return `${{value}} B`;
       if (value < 1024 * 1024) return `${{(value / 1024).toFixed(1)}} KB`;
       return `${{(value / 1024 / 1024).toFixed(1)}} MB`;
+    }}
+
+    function escapeHtml(value) {{
+      return String(value).replace(/[&<>"']/g, char => ({{
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      }}[char]));
+    }}
+
+    function cleanupPreviewUrls() {{
+      previewUrls.forEach(url => URL.revokeObjectURL(url));
+      previewUrls = [];
+    }}
+
+    function renderSelectedPreviews() {{
+      cleanupPreviewUrls();
+      const files = [...fileInput.files];
+      if (!files.length) {{
+        results.className = 'empty';
+        results.textContent = '等待选择图片';
+        summary.textContent = '';
+        return;
+      }}
+      const previews = files.map(file => {{
+        const url = URL.createObjectURL(file);
+        previewUrls.push(url);
+        return `<article class="preview-card">
+          <img src="${{url}}" alt="${{escapeHtml(file.name)}} 预览">
+          <div class="preview-meta">
+            <strong>${{escapeHtml(file.name)}}</strong>
+            <span>${{fmtBytes(file.size)}} · 待处理</span>
+          </div>
+        </article>`;
+      }}).join('');
+      results.className = '';
+      results.innerHTML = `<div class="preview-grid">${{previews}}</div>`;
+      summary.textContent = `${{files.length}} 张待处理`;
     }}
 
     function findingList(report) {{
@@ -1113,14 +1201,13 @@ def _render_index(settings: WebSettings) -> str:
       }}
       submit.disabled = true;
       submit.textContent = '处理中...';
-      summary.textContent = '';
-      results.className = 'empty';
-      results.textContent = '处理中';
+      summary.textContent = '处理中...';
       const body = new FormData(form);
       try {{
         const response = await fetch('/api/clean', {{ method: 'POST', body }});
         const payload = await response.json();
         if (!response.ok) throw new Error(payload.detail || '处理失败');
+        cleanupPreviewUrls();
         results.className = '';
         results.innerHTML = payload.results.map(renderResult).join('');
         const okCount = payload.results.filter(x => x.ok).length;

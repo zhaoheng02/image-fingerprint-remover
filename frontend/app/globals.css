@@ -305,6 +305,70 @@ input {
   padding: 18px;
 }
 
+.mode-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin: 10px 0 14px;
+}
+
+.mode-tabs button {
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  color: var(--muted);
+  cursor: pointer;
+  font-weight: 780;
+}
+
+.mode-tabs button.active {
+  border-color: var(--teal);
+  background: #e8f6f2;
+  color: var(--teal);
+}
+
+.preview-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.preview-thumb {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.preview-thumb img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: contain;
+  background: #eef2f7;
+}
+
+.preview-thumb div {
+  border-top: 1px solid var(--line);
+  padding: 9px;
+}
+
+.preview-thumb strong {
+  display: block;
+  font-size: 13px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.preview-thumb span {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .result-list {
   display: grid;
   gap: 10px;
@@ -320,6 +384,10 @@ input {
   .dashboard-grid,
   .grid {
     grid-template-columns: 1fr;
+  }
+
+  .mode-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .nav {

@@ -103,6 +103,7 @@ Recommended production setup: put HTTPS, request-size limits, rate limiting, and
 - `IMGCLEAN_WEB_DATA_DIR` — cleaned-file cache directory, defaults to `.web_data`
 - `IMGCLEAN_MAX_UPLOAD_MB` — per-file upload limit, defaults to `25`
 - `IMGCLEAN_JOB_TTL_SECONDS` — cleaned download cache TTL, defaults to `21600`
+- `IMGCLEAN_AUTH_MODE=wechat` plus `WECHAT_APP_ID`, `WECHAT_APP_SECRET`, `WECHAT_REDIRECT_URI`, and `IMGCLEAN_SESSION_SECRET` — enable WeChat QR OAuth login
 
 ## What it detects
 
@@ -131,6 +132,7 @@ Recommended production setup: put HTTPS, request-size limits, rate limiting, and
 | **safe** | Strip every non-essential metadata chunk/segment; drop trailing bytes; keep `IDAT` / scan data byte-for-byte. | ✅ | Posting images on the web while preserving exact quality. |
 | **paranoid** | safe + re-encode pixels through a stock encoder + Gaussian noise σ=0.5 + reset filesystem mtime. | ❌ (imperceptible) | Neutralizing JPEG quantization-table fingerprints; bulk sanitization; weakens but does not defeat trained pixel watermarks. |
 | **nuclear** | paranoid + resize to 99.7% + crop 2px + per-channel color bias + transcode through a different codec. | ❌ (visible-but-mild) | Best-effort disruption of robust frequency-domain watermarks (Google SynthID, Digimarc, IMATAG). |
+| **watermark** | Detect likely visible text watermarks or use a supplied `x,y,w,h` / mask, then inpaint the masked pixels. | ❌ | Removing visible overlay text from images before metadata cleanup. |
 
 ## Architecture
 

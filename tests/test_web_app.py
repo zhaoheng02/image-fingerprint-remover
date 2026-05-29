@@ -53,3 +53,16 @@ def test_clean_endpoint_returns_reports_and_download(tmp_path, monkeypatch):
     assert download.status_code == 200
     assert download.headers["content-type"] == "image/png"
     assert "attachment" in download.headers["content-disposition"]
+
+
+def test_index_renders_selected_image_previews(tmp_path, monkeypatch):
+    monkeypatch.setenv("IMGCLEAN_WEB_DATA_DIR", str(tmp_path / "web-data"))
+    client = TestClient(create_app())
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    html = response.text
+    assert "renderSelectedPreviews" in html
+    assert "URL.createObjectURL" in html
+    assert "preview-grid" in html
