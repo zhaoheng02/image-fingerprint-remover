@@ -6,18 +6,22 @@ from dataclasses import dataclass
 import httpx
 from fastapi import HTTPException, Request
 
+from .session import InvalidSession, read_session_token
+
 
 @dataclass(frozen=True)
 class User:
     user_id: str
     email: str = ""
+    name: str = ""
 
 
 class Authenticator:
-    def __init__(self, mode: str, supabase_url: str = "", supabase_key: str = ""):
+    def __init__(self, mode: str, supabase_url: str = "", supabase_key: str = "", session_secret: str = ""):
         self.mode = mode
         self.supabase_url = supabase_url.rstrip("/")
         self.supabase_key = supabase_key
+        self.session_secret = session_secret
 
     async def current_user(self, request: Request) -> User | None:
         if self.mode == "none":
@@ -29,6 +33,8 @@ class Authenticator:
             return User(user_id=user_id, email=request.headers.get("x-user-email", ""))
         if self.mode == "supabase":
             return await self._supabase_user(request)
+        if self.mode == "wechat":
+            return self._session_user(request)
         raise HTTPException(status_code=500, detail=f"Unsupported auth mode: {self.mode}")
 
     async def _supabase_user(self, request: Request) -> User:
@@ -50,3 +56,11 @@ class Authenticator:
             raise HTTPException(status_code=401, detail="Invalid Supabase session.")
         data = res.json()
         return User(user_id=data["id"], email=data.get("email", ""))
+
+    def _session_user(self, request: Request) -> User:
+        token = request.cookies.get("imgclean_session", "")
+        try:
+            data = read_session_token(token, self.session_secret)
+        except InvalidSession:
+            raise HTTPException(status_code=401, detail="Login required.")
+        return User(user_id=data["sub"], email=data.get("email", ""), name=data.get("name", ""))

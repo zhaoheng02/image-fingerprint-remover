@@ -95,6 +95,39 @@ def test_clean_rejects_when_user_has_no_credits(tmp_path, monkeypatch):
     assert response.json()["detail"] == "Insufficient credits."
 
 
+def test_watermark_mode_requires_mask_or_box(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch, credits="2")
+
+    response = client.post(
+        "/api/clean",
+        headers={"x-user-id": "user-watermark"},
+        data={"mode": "watermark"},
+        files=[("files", ("dirty.png", _make_dirty_png(), "image/png"))],
+    )
+
+    assert response.status_code == 400
+    assert "requires a mask image or box" in response.json()["detail"]
+
+
+def test_watermark_mode_accepts_box_and_returns_download(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch, credits="2")
+
+    response = client.post(
+        "/api/clean",
+        headers={"x-user-id": "user-watermark"},
+        data={"mode": "watermark", "watermark_box": "0,0,2,2"},
+        files=[("files", ("dirty.png", _make_dirty_png(), "image/png"))],
+    )
+
+    assert response.status_code == 200
+    result = response.json()["results"][0]
+    assert result["ok"] is True
+    assert result["download_filename"].endswith(".png")
+    download = client.get(result["download_url"])
+    assert download.status_code == 200
+    assert download.headers["content-type"] == "image/png"
+
+
 def test_lemonsqueezy_webhook_grants_credits(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch, credits="0")
     body = json.dumps(
@@ -230,6 +263,54 @@ def test_cors_allows_vercel_frontend(tmp_path, monkeypatch):
 
     assert response.status_code == 200
     assert response.headers["access-control-allow-origin"] == "https://frontend-green-one-33.vercel.app"
+
+
+def test_download_proxy_rejects_untrusted_hosts(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+
+    response = client.get("/api/download", params={"url": "https://example.com/file.png"})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Unsupported download URL."
+
+
+def test_download_proxy_returns_attachment(tmp_path, monkeypatch):
+    monkeypatch.setenv("SUPABASE_URL", "https://project.supabase.co")
+    client = _client(tmp_path, monkeypatch)
+
+    class FakeResponse:
+        status_code = 200
+        content = b"image-bytes"
+        headers = {"content-type": "image/png"}
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            assert url == "https://project.supabase.co/storage/v1/object/sign/imgclean-files/a.png?token=abc"
+            return FakeResponse()
+
+    monkeypatch.setattr("imgclean_web.app.httpx.AsyncClient", FakeAsyncClient)
+
+    response = client.get(
+        "/api/download",
+        params={
+            "url": "https://project.supabase.co/storage/v1/object/sign/imgclean-files/a.png?token=abc",
+            "filename": "a.cleaned.png",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.content == b"image-bytes"
+    assert response.headers["content-type"] == "image/png"
+    assert response.headers["content-disposition"] == 'attachment; filename="a.cleaned.png"'
 
 
 def test_supabase_storage_uploads_and_returns_signed_url(monkeypatch):

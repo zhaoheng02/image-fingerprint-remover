@@ -42,6 +42,8 @@ spec:
               value: https://.*\.vercel\.app
             - name: APP_BASE_URL
               value: https://frontend-green-one-33.vercel.app
+            - name: WECHAT_REDIRECT_URI
+              value: https://replace-with-api-url/api/auth/wechat/callback
             - name: SUPABASE_URL
               value: https://avqgeqslhywrulnzjgzo.supabase.co
             - name: R2_ENDPOINT_URL
@@ -83,4 +85,19 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: imgclean-lemonsqueezy-webhook-secret
+                  key: latest
+            - name: IMGCLEAN_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: imgclean-session-secret
+                  key: latest
+            - name: WECHAT_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: imgclean-wechat-app-id
+                  key: latest
+            - name: WECHAT_APP_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: imgclean-wechat-app-secret
                   key: latest

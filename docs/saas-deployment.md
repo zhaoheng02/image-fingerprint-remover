@@ -31,6 +31,7 @@ For the free trial deployment, deploy the API to Vercel with the variables liste
 - `IMGCLEAN_AUTH_MODE=none` so uploads are anonymous.
 - `IMGCLEAN_STORAGE_BACKEND=supabase` so cleaned files are stored in Supabase Storage instead of an ephemeral serverless filesystem.
 - Billing disabled at the frontend by setting `NEXT_PUBLIC_BILLING_ENABLED=false`.
+- Downloads are proxied through `/api/download` when the stored object URL is cross-origin, so browsers download the file instead of opening an image preview tab.
 
 For Cloud Run, use the variables listed in `deploy/cloud-run.env.example`.
 
@@ -42,10 +43,28 @@ Required secrets:
 - `imgclean-stripe-secret-key` -> `STRIPE_SECRET_KEY`
 - `imgclean-stripe-webhook-secret` -> `STRIPE_WEBHOOK_SECRET`
 - `imgclean-lemonsqueezy-webhook-secret` -> `LEMONSQUEEZY_WEBHOOK_SECRET`
+- `imgclean-session-secret` -> `IMGCLEAN_SESSION_SECRET`
+- `imgclean-wechat-app-id` -> `WECHAT_APP_ID`
+- `imgclean-wechat-app-secret` -> `WECHAT_APP_SECRET`
 
 The Cloud Run service template in `deploy/cloud-run-service.yaml` reads these from Google Secret Manager. Create each secret before applying the service YAML, then replace `IMAGE_PLACEHOLDER` with the pushed container image.
 
 The Vercel API entrypoint is `app.py`. Vercel reads runtime dependencies from `requirements.txt`.
+
+## WeChat OAuth
+
+Set the backend to `IMGCLEAN_AUTH_MODE=wechat`, configure `IMGCLEAN_SESSION_SECRET`, `WECHAT_APP_ID`, `WECHAT_APP_SECRET`, and `WECHAT_REDIRECT_URI`, then set the frontend to:
+
+```bash
+NEXT_PUBLIC_REQUIRE_AUTH=true
+NEXT_PUBLIC_AUTH_PROVIDER=wechat
+```
+
+The login button redirects to `/api/auth/wechat/login`, which uses the WeChat Open Platform website OAuth scope `snsapi_login`, exchanges the callback code, and sets an `imgclean_session` signed cookie.
+
+## Watermark Removal
+
+`POST /api/clean` supports `mode=watermark`. This first implementation is mask/area based: provide either `watermark_box=x,y,w,h` or a `watermark_mask` file where white pixels mark the watermark area. Arbitrary automatic watermark detection is intentionally left for a model-backed follow-up.
 
 ## Frontend environment
 

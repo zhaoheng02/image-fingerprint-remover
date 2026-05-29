@@ -8,13 +8,15 @@ import uuid
 import hmac
 import hashlib
 import inspect as pyinspect
+from urllib.parse import quote, urlencode, urlparse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 
 from imgclean.clean import VALID_MODES, clean_bytes
 from imgclean.detect import detect_format, inspect as inspect_file
@@ -22,13 +24,19 @@ from imgclean.findings import InspectReport
 from .billing import BillingNotConfigured, StripeBilling, UnknownCreditPack
 from .identity import Authenticator, User
 from .ledger import InsufficientCredits, LocalLedger, SupabaseLedger
+from .session import create_session_token, read_session_token
 from .storage import LocalStorage, R2Storage, SupabaseStorage
+from .watermark import WatermarkRequest, parse_watermark_box, remove_watermark_bytes
 
 
 SUPPORTED_FORMATS = {"png", "jpeg"}
 MIME_TYPES = {"png": "image/png", "jpeg": "image/jpeg"}
 DEFAULT_MAX_UPLOAD_MB = 25
 DEFAULT_TTL_SECONDS = 6 * 60 * 60
+WEB_MODES = set(VALID_MODES) | {"watermark"}
+WECHAT_AUTH_URL = "https://open.weixin.qq.com/connect/qrconnect"
+WECHAT_TOKEN_URL = "https://api.weixin.qq.com/sns/oauth2/access_token"
+WECHAT_USERINFO_URL = "https://api.weixin.qq.com/sns/userinfo"
 
 
 @dataclass(frozen=True)
@@ -56,6 +64,10 @@ class WebSettings:
     app_base_url: str
     cors_origins: tuple[str, ...]
     cors_origin_regex: str
+    session_secret: str
+    wechat_app_id: str
+    wechat_app_secret: str
+    wechat_redirect_uri: str
 
     @classmethod
     def from_env(cls) -> "WebSettings":
@@ -97,6 +109,10 @@ class WebSettings:
             ),
             cors_origins=cors_origins,
             cors_origin_regex=os.environ.get("IMGCLEAN_CORS_ORIGIN_REGEX", r"https://.*\.vercel\.app"),
+            session_secret=os.environ.get("IMGCLEAN_SESSION_SECRET", ""),
+            wechat_app_id=os.environ.get("WECHAT_APP_ID", ""),
+            wechat_app_secret=os.environ.get("WECHAT_APP_SECRET", ""),
+            wechat_redirect_uri=os.environ.get("WECHAT_REDIRECT_URI", ""),
         )
 
 
@@ -111,9 +127,15 @@ def create_app() -> FastAPI:
         allow_origin_regex=settings.cors_origin_regex or None,
         allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["authorization", "content-type"],
+        allow_credentials=True,
     )
     app.state.settings = settings
-    app.state.auth = Authenticator(settings.auth_mode, settings.supabase_url, settings.supabase_secret_key)
+    app.state.auth = Authenticator(
+        settings.auth_mode,
+        settings.supabase_url,
+        settings.supabase_secret_key,
+        settings.session_secret,
+    )
     app.state.ledger = _build_ledger(settings)
     app.state.storage = _build_storage(settings)
     app.state.billing = _build_billing(settings)
@@ -136,6 +158,7 @@ def create_app() -> FastAPI:
             "authenticated": True,
             "user_id": account.user_id,
             "email": account.email,
+            "name": user.name,
             "credits": account.credits,
         }
 
@@ -143,19 +166,32 @@ def create_app() -> FastAPI:
     async def clean_endpoint(
         request: Request,
         mode: str = Form("safe"),
+        watermark_box: str = Form(""),
         files: list[UploadFile] = File(...),
+        watermark_mask: UploadFile | None = File(None),
     ) -> dict[str, Any]:
-        if mode not in VALID_MODES:
+        if mode not in WEB_MODES:
             raise HTTPException(status_code=400, detail=f"Unsupported mode: {mode}")
         if not files:
             raise HTTPException(status_code=400, detail="Upload at least one file.")
 
         user = await app.state.auth.current_user(request)
+        mask_bytes = await watermark_mask.read() if watermark_mask is not None else None
+        if watermark_mask is not None:
+            await watermark_mask.close()
+        try:
+            watermark_request = WatermarkRequest(mask_bytes=mask_bytes, box=parse_watermark_box(watermark_box))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         app.state.storage.purge_expired() if hasattr(app.state.storage, "purge_expired") else None
         results: list[dict[str, Any]] = []
         for upload in files:
             try:
-                results.append(await _process_upload(upload, mode, settings, app.state.storage, app.state.ledger, user))
+                results.append(
+                    await _process_upload(upload, mode, settings, app.state.storage, app.state.ledger, user, watermark_request)
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
             except InsufficientCredits:
                 raise HTTPException(status_code=402, detail="Insufficient credits.")
             except HTTPException as exc:
@@ -167,6 +203,98 @@ def create_app() -> FastAPI:
             finally:
                 await upload.close()
         return {"mode": mode, "results": results}
+
+    @app.get("/api/auth/wechat/login")
+    def wechat_login(return_to: str = "") -> RedirectResponse:
+        if not settings.wechat_app_id or not settings.wechat_app_secret:
+            raise HTTPException(status_code=503, detail="WeChat OAuth is not configured.")
+        if not settings.session_secret:
+            raise HTTPException(status_code=503, detail="Session secret is not configured.")
+        redirect_uri = settings.wechat_redirect_uri or f"{settings.app_base_url.rstrip('/')}/api/auth/wechat/callback"
+        state = create_session_token(
+            {
+                "kind": "wechat_oauth_state",
+                "return_to": _safe_return_to(return_to, settings.app_base_url),
+            },
+            settings.session_secret,
+            ttl_seconds=10 * 60,
+        )
+        query = urlencode(
+            {
+                "appid": settings.wechat_app_id,
+                "redirect_uri": redirect_uri,
+                "response_type": "code",
+                "scope": "snsapi_login",
+                "state": state,
+            },
+            quote_via=quote,
+        )
+        return RedirectResponse(f"{WECHAT_AUTH_URL}?{query}#wechat_redirect", status_code=302)
+
+    @app.get("/api/auth/wechat/callback")
+    async def wechat_callback(code: str, state: str) -> RedirectResponse:
+        if not settings.wechat_app_id or not settings.wechat_app_secret or not settings.session_secret:
+            raise HTTPException(status_code=503, detail="WeChat OAuth is not configured.")
+        try:
+            state_payload = read_session_token(state, settings.session_secret)
+        except Exception:
+            raise HTTPException(status_code=401, detail="Invalid OAuth state.")
+        if state_payload.get("kind") != "wechat_oauth_state":
+            raise HTTPException(status_code=401, detail="Invalid OAuth state.")
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            token_response = await client.get(
+                WECHAT_TOKEN_URL,
+                params={
+                    "appid": settings.wechat_app_id,
+                    "secret": settings.wechat_app_secret,
+                    "code": code,
+                    "grant_type": "authorization_code",
+                },
+            )
+            token_response.raise_for_status()
+            token_payload = token_response.json()
+            if "errcode" in token_payload:
+                raise HTTPException(status_code=401, detail=token_payload.get("errmsg", "WeChat login failed."))
+            user_response = await client.get(
+                WECHAT_USERINFO_URL,
+                params={
+                    "access_token": token_payload["access_token"],
+                    "openid": token_payload["openid"],
+                    "lang": "zh_CN",
+                },
+            )
+            user_response.raise_for_status()
+            profile = user_response.json()
+            if "errcode" in profile:
+                raise HTTPException(status_code=401, detail=profile.get("errmsg", "WeChat profile failed."))
+
+        union_or_open_id = profile.get("unionid") or token_payload["openid"]
+        session = create_session_token(
+            {
+                "sub": f"wechat:{union_or_open_id}",
+                "provider": "wechat",
+                "name": profile.get("nickname", ""),
+                "email": "",
+            },
+            settings.session_secret,
+        )
+        response = RedirectResponse(_safe_return_to(str(state_payload.get("return_to") or ""), settings.app_base_url), status_code=302)
+        response.set_cookie(
+            "imgclean_session",
+            session,
+            httponly=True,
+            secure=settings.app_base_url.startswith("https://"),
+            samesite="none" if settings.app_base_url.startswith("https://") else "lax",
+            max_age=30 * 24 * 60 * 60,
+        )
+        return response
+
+    @app.post("/api/auth/logout")
+    def logout() -> Response:
+        response = Response(content='{"ok":true}', media_type="application/json")
+        response.delete_cookie("imgclean_session", samesite="none" if settings.app_base_url.startswith("https://") else "lax")
+        return response
 
     @app.post("/api/billing/checkout")
     async def create_checkout(request: Request) -> dict[str, Any]:
@@ -333,6 +461,23 @@ def create_app() -> FastAPI:
             filename=filename,
         )
 
+    @app.get("/api/download")
+    async def download_proxy(url: str, filename: str = "cleaned-image") -> Response:
+        parsed = urlparse(url)
+        allowed_hosts = {urlparse(settings.supabase_url).netloc} if settings.supabase_url else set()
+        if parsed.scheme not in {"http", "https"} or parsed.netloc not in allowed_hosts:
+            raise HTTPException(status_code=400, detail="Unsupported download URL.")
+        async with httpx.AsyncClient(timeout=60) as client:
+            remote = await client.get(url)
+        if remote.status_code >= 400:
+            raise HTTPException(status_code=remote.status_code, detail="Download failed.")
+        safe_name = _safe_filename(filename)
+        return Response(
+            content=remote.content,
+            media_type=remote.headers.get("content-type", "application/octet-stream"),
+            headers={"content-disposition": f'attachment; filename="{safe_name}"'},
+        )
+
     return app
 
 
@@ -343,6 +488,7 @@ async def _process_upload(
     storage: Any,
     ledger: Any,
     user: User | None,
+    watermark_request: WatermarkRequest | None = None,
 ) -> dict[str, Any]:
     original_name = _safe_filename(upload.filename or "image")
     data = await upload.read(settings.max_upload_bytes + 1)
@@ -364,7 +510,10 @@ async def _process_upload(
         storage.put_original(job_id, original_name, data, _suffix_for_format(fmt))
     input_report = inspect_file(input_path)
 
-    cleaned, fmt_out = clean_bytes(data, mode=mode)
+    if mode == "watermark":
+        cleaned, fmt_out = remove_watermark_bytes(data, fmt, watermark_request or WatermarkRequest())
+    else:
+        cleaned, fmt_out = clean_bytes(data, mode=mode)
     output_suffix = _suffix_for_format(fmt_out)
     cleaned_name = f"{Path(original_name).stem}.cleaned{output_suffix}"
     stored = storage.put_cleaned(job_id, cleaned_name, cleaned, output_suffix)
@@ -458,6 +607,19 @@ def _build_billing(settings: WebSettings) -> StripeBilling:
         settings.stripe_price_growth,
         settings.stripe_api_base_url,
     )
+
+
+def _safe_return_to(return_to: str, app_base_url: str) -> str:
+    fallback = f"{app_base_url.rstrip('/')}/dashboard"
+    if not return_to:
+        return fallback
+    parsed = urlparse(return_to)
+    base = urlparse(app_base_url)
+    if parsed.scheme in {"http", "https"} and parsed.netloc == base.netloc:
+        return return_to
+    if return_to.startswith("/"):
+        return f"{app_base_url.rstrip('/')}{return_to}"
+    return fallback
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -597,11 +759,18 @@ def _render_index(settings: WebSettings) -> str:
       color: var(--muted);
       font-size: 14px;
     }}
-    input[type="file"] {{
+    #files {{
       position: absolute;
       inline-size: 1px;
       block-size: 1px;
       opacity: 0;
+    }}
+    .pick-button {{
+      width: auto;
+      min-width: 160px;
+      margin: 14px auto 0;
+      padding: 10px 14px;
+      font-size: 14px;
     }}
     fieldset {{
       border: 0;
@@ -631,6 +800,29 @@ def _render_index(settings: WebSettings) -> str:
       color: var(--muted);
       font-size: 13px;
       margin-left: auto;
+    }}
+    .watermark-options {{
+      display: none;
+      margin-top: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: #ffffff;
+    }}
+    .watermark-options.active {{
+      display: block;
+    }}
+    .watermark-options label {{
+      margin-top: 10px;
+      font-size: 13px;
+    }}
+    .watermark-options input[type="text"],
+    .watermark-options input[type="file"] {{
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 10px;
+      background: #fbfcfe;
     }}
     button {{
       width: 100%;
@@ -788,6 +980,7 @@ def _render_index(settings: WebSettings) -> str:
           <span>
             <strong id="file-title">选择或拖入图片</strong>
             <span id="file-subtitle">可一次处理多张 PNG / JPEG</span>
+            <button class="pick-button" type="button" id="pick-files">选择本地图片</button>
           </span>
         </label>
         <input id="files" name="files" type="file" accept="image/png,image/jpeg" multiple required>
@@ -797,10 +990,18 @@ def _render_index(settings: WebSettings) -> str:
             <label class="mode"><input type="radio" name="mode" value="safe" checked>安全<span>元数据</span></label>
             <label class="mode"><input type="radio" name="mode" value="paranoid">深度<span>重编码</span></label>
             <label class="mode"><input type="radio" name="mode" value="nuclear">核弹<span>扰动像素</span></label>
+            <label class="mode"><input type="radio" name="mode" value="watermark">去水印<span>遮罩 / 区域</span></label>
+          </div>
+          <div class="watermark-options" id="watermark-options">
+            <p class="fineprint">第一版去水印需要指定区域。可填写像素区域 x,y,w,h，或上传黑白遮罩图，白色区域为水印。</p>
+            <label for="watermark-box">水印区域</label>
+            <input id="watermark-box" name="watermark_box" type="text" placeholder="例如：120,80,300,90">
+            <label for="watermark-mask">水印遮罩图</label>
+            <input id="watermark-mask" name="watermark_mask" type="file" accept="image/png,image/jpeg">
           </div>
         </fieldset>
         <button id="submit" type="submit">开始处理</button>
-        <p class="fineprint">上传文件仅用于本次处理，原图不会保留；下载文件会在本机缓存目录中短期保存。</p>
+        <p class="fineprint">上传文件仅用于本次处理，原图不会保留；下载文件会生成短期有效的清理结果。</p>
       </form>
     </section>
     <section>
@@ -820,11 +1021,24 @@ def _render_index(settings: WebSettings) -> str:
     const submit = document.getElementById('submit');
     const summary = document.getElementById('summary');
     const dropzone = document.getElementById('dropzone');
+    const pickFiles = document.getElementById('pick-files');
+    const watermarkOptions = document.getElementById('watermark-options');
 
     function updateFileLabel() {{
       const count = fileInput.files.length;
       fileTitle.textContent = count ? `${{count}} 张图片已选择` : '选择或拖入图片';
       fileSubtitle.textContent = count ? [...fileInput.files].map(f => f.name).join(' · ') : '可一次处理多张 PNG / JPEG';
+      results.className = 'empty';
+      results.textContent = count ? `已选择 ${{count}} 张图片，点击“开始处理”上传并清理。` : '等待选择图片';
+      summary.textContent = '';
+    }}
+
+    function selectedMode() {{
+      return form.querySelector('input[name="mode"]:checked').value;
+    }}
+
+    function updateModeOptions() {{
+      watermarkOptions.classList.toggle('active', selectedMode() === 'watermark');
     }}
 
     function fmtBytes(value) {{
@@ -837,6 +1051,15 @@ def _render_index(settings: WebSettings) -> str:
       const entries = Object.entries(report.by_category || {{}});
       if (!entries.length) return '<ul class="findings"><li>无中高风险项</li></ul>';
       return `<ul class="findings">${{entries.map(([k, v]) => `<li>${{k}} × ${{v}}</li>`).join('')}}</ul>`;
+    }}
+
+    function proxyDownloadHref(item) {{
+      if (!item.download_url) return '#';
+      const filename = item.download_filename || 'cleaned-image';
+      if (item.download_url.startsWith('http')) {{
+        return `/api/download?url=${{encodeURIComponent(item.download_url)}}&filename=${{encodeURIComponent(filename)}}`;
+      }}
+      return item.download_url;
     }}
 
     function renderResult(item) {{
@@ -855,11 +1078,16 @@ def _render_index(settings: WebSettings) -> str:
           <div class="metric"><b>${{fmtBytes(item.output_size)}}</b><span>输出大小</span></div>
         </div>
         ${{findingList(item.input)}}
-        <a class="download" href="${{item.download_url}}">下载 cleaned 图片</a>
+        <a class="download" href="${{proxyDownloadHref(item)}}" download="${{item.download_filename || 'cleaned-image'}}">下载 cleaned 图片</a>
       </article>`;
     }}
 
     fileInput.addEventListener('change', updateFileLabel);
+    pickFiles.addEventListener('click', event => {{
+      event.preventDefault();
+      fileInput.click();
+    }});
+    form.querySelectorAll('input[name="mode"]').forEach(input => input.addEventListener('change', updateModeOptions));
     dropzone.addEventListener('dragover', event => {{
       event.preventDefault();
       dropzone.style.borderColor = '#1d5fd1';
@@ -875,8 +1103,14 @@ def _render_index(settings: WebSettings) -> str:
         updateFileLabel();
       }}
     }});
+    updateModeOptions();
     form.addEventListener('submit', async event => {{
       event.preventDefault();
+      if (!fileInput.files.length) {{
+        results.className = 'empty';
+        results.textContent = '请先选择本地图片。';
+        return;
+      }}
       submit.disabled = true;
       submit.textContent = '处理中...';
       summary.textContent = '';
