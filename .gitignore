@@ -18,6 +18,15 @@ dist/
 .coverage
 .tox/
 htmlcov/
+node_modules/
+.next/
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.env*.local
+frontend/package-lock.json
+.env
+.env.local
 
 # OS
 .DS_Store
@@ -38,3 +47,7 @@ samples/chatgpt_test.png
 
 # Local cache the GUI creates
 ~/Library/Caches/imgclean/
+
+# Local cache the web app creates
+.web_data/
+.vercel

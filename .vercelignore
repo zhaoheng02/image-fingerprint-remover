@@ -1,0 +1,13 @@
+.git
+.venv
+.web_data
+.pytest_cache
+frontend
+docs
+deploy
+samples
+tests
+scripts
+imgclean_gui
+**/__pycache__
+**/*.pyc

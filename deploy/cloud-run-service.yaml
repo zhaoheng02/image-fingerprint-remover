@@ -1,0 +1,86 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: imgclean-api
+spec:
+  template:
+    metadata:
+      annotations:
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "10"
+    spec:
+      containerConcurrency: 20
+      timeoutSeconds: 300
+      containers:
+        - image: IMAGE_PLACEHOLDER
+          ports:
+            - containerPort: 8000
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+            - name: PORT
+              value: "8000"
+            - name: IMGCLEAN_AUTH_MODE
+              value: supabase
+            - name: IMGCLEAN_LEDGER_BACKEND
+              value: supabase
+            - name: IMGCLEAN_STORAGE_BACKEND
+              value: r2
+            - name: IMGCLEAN_MAX_UPLOAD_MB
+              value: "25"
+            - name: IMGCLEAN_JOB_TTL_SECONDS
+              value: "21600"
+            - name: IMGCLEAN_INITIAL_CREDITS
+              value: "0"
+            - name: IMGCLEAN_CORS_ORIGINS
+              value: https://frontend-green-one-33.vercel.app
+            - name: IMGCLEAN_CORS_ORIGIN_REGEX
+              value: https://.*\.vercel\.app
+            - name: APP_BASE_URL
+              value: https://frontend-green-one-33.vercel.app
+            - name: SUPABASE_URL
+              value: https://avqgeqslhywrulnzjgzo.supabase.co
+            - name: R2_ENDPOINT_URL
+              value: https://replace-account-id.r2.cloudflarestorage.com
+            - name: R2_BUCKET
+              value: imgclean-files
+            - name: STRIPE_API_BASE_URL
+              value: https://api.stripe.com
+            - name: STRIPE_PRICE_STARTER
+              value: ""
+            - name: STRIPE_PRICE_GROWTH
+              value: ""
+            - name: SUPABASE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: imgclean-supabase-secret-key
+                  key: latest
+            - name: R2_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: imgclean-r2-access-key-id
+                  key: latest
+            - name: R2_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: imgclean-r2-secret-access-key
+                  key: latest
+            - name: STRIPE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: imgclean-stripe-secret-key
+                  key: latest
+            - name: STRIPE_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: imgclean-stripe-webhook-secret
+                  key: latest
+            - name: LEMONSQUEEZY_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: imgclean-lemonsqueezy-webhook-secret
+                  key: latest

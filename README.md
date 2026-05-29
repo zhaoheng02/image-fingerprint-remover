@@ -78,6 +78,32 @@ Exit codes: `0` = clean / success · `1` = identifying metadata present (inspect
 
 Drag images or folders onto the window. Each file is inspected in parallel and rendered with its detection status and category badges. Pick a mode, click "清除 N 张图片", done.
 
+### Web app
+
+```bash
+.venv/bin/pip install -r requirements-web.txt
+.venv/bin/python -m imgclean_web
+```
+
+Open `http://127.0.0.1:8000` to upload PNG/JPEG images, choose a cleaning mode, and download cleaned outputs. To bind it for other machines on the network:
+
+```bash
+HOST=0.0.0.0 PORT=8000 .venv/bin/python -m imgclean_web
+```
+
+For a server deployment, build the bundled Docker image:
+
+```bash
+docker build -t image-fingerprint-remover .
+docker run --rm -p 8000:8000 -v imgclean-data:/data image-fingerprint-remover
+```
+
+Recommended production setup: put HTTPS, request-size limits, rate limiting, and access control in front of the app with Nginx, Caddy, Cloudflare, or your platform ingress. Runtime knobs:
+
+- `IMGCLEAN_WEB_DATA_DIR` — cleaned-file cache directory, defaults to `.web_data`
+- `IMGCLEAN_MAX_UPLOAD_MB` — per-file upload limit, defaults to `25`
+- `IMGCLEAN_JOB_TTL_SECONDS` — cleaned download cache TTL, defaults to `21600`
+
 ## What it detects
 
 | Category | Examples |
@@ -143,6 +169,7 @@ If you need stronger guarantees against trained watermarks, the only known relia
 ## Tests
 
 ```bash
+.venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m pytest tests/ -v                                         # engine tests
 QT_QPA_PLATFORM=offscreen .venv/bin/python scripts/gui_smoke.py              # headless GUI smoke
 ```

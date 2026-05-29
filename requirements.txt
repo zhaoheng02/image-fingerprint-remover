@@ -1,0 +1,6 @@
+Pillow
+numpy
+fastapi
+python-multipart
+httpx
+boto3

@@ -1,0 +1,7 @@
+Pillow
+numpy
+fastapi
+uvicorn
+python-multipart
+httpx
+boto3
