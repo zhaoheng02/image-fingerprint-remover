@@ -5,6 +5,7 @@ import json
 import time
 import struct
 import zlib
+from urllib.parse import parse_qs, urlparse
 
 from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
@@ -326,18 +327,50 @@ def test_download_proxy_returns_attachment(tmp_path, monkeypatch):
 
 
 def test_wechat_auth_status_reports_configuration(tmp_path, monkeypatch):
-    for key in ("WECHAT_APP_ID", "WECHAT_APP_SECRET", "IMGCLEAN_SESSION_SECRET"):
+    for key in ("WECHAT_APP_ID", "WECHAT_APP_SECRET", "IMGCLEAN_SESSION_SECRET", "WECHAT_REDIRECT_URI"):
         monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("IMGCLEAN_API_BASE_URL", "https://imgclean-api.vercel.app")
     client = _client(tmp_path, monkeypatch)
 
     response = client.get("/api/auth/wechat/status")
 
     assert response.status_code == 200
-    assert response.json() == {
-        "provider": "wechat",
-        "configured": False,
-        "missing": ["WECHAT_APP_ID", "WECHAT_APP_SECRET", "IMGCLEAN_SESSION_SECRET"],
-    }
+    payload = response.json()
+    assert payload["provider"] == "wechat"
+    assert payload["configured"] is False
+    assert payload["missing"] == ["WECHAT_APP_ID", "WECHAT_APP_SECRET", "IMGCLEAN_SESSION_SECRET"]
+    assert payload["callback_url"] == "https://imgclean-api.vercel.app/api/auth/wechat/callback"
+    assert payload["callback_domain"] == "imgclean-api.vercel.app"
+
+
+def test_wechat_login_redirect_uses_api_callback_from_request(tmp_path, monkeypatch):
+    for key in ("WECHAT_REDIRECT_URI", "IMGCLEAN_API_BASE_URL"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("WECHAT_APP_ID", "wx-test-app")
+    monkeypatch.setenv("WECHAT_APP_SECRET", "wechat-secret")
+    monkeypatch.setenv("IMGCLEAN_SESSION_SECRET", "session-secret")
+    client = _client(tmp_path, monkeypatch)
+
+    response = client.get(
+        "/api/auth/wechat/login",
+        params={"return_to": "https://frontend-green-one-33.vercel.app/dashboard"},
+        headers={"host": "api.example.com", "x-forwarded-proto": "https"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 302
+    location = response.headers["location"]
+    parsed = urlparse(location)
+    params = parse_qs(parsed.query)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "open.weixin.qq.com"
+    assert parsed.path == "/connect/qrconnect"
+    assert params["appid"] == ["wx-test-app"]
+    assert params["redirect_uri"] == ["https://api.example.com/api/auth/wechat/callback"]
+    assert params["response_type"] == ["code"]
+    assert params["scope"] == ["snsapi_login"]
+    assert "state" in params
+    assert parsed.fragment == "wechat_redirect"
 
 
 def test_supabase_storage_uploads_and_returns_signed_url(monkeypatch):

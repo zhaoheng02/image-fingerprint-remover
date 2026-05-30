@@ -40,6 +40,8 @@ spec:
               value: https://frontend-green-one-33.vercel.app
             - name: IMGCLEAN_CORS_ORIGIN_REGEX
               value: https://.*\.vercel\.app
+            - name: IMGCLEAN_API_BASE_URL
+              value: https://replace-with-api-url
             - name: APP_BASE_URL
               value: https://frontend-green-one-33.vercel.app
             - name: WECHAT_REDIRECT_URI

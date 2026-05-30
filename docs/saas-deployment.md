@@ -53,18 +53,27 @@ The Vercel API entrypoint is `app.py`. Vercel reads runtime dependencies from `r
 
 ## WeChat OAuth
 
-Set the backend to `IMGCLEAN_AUTH_MODE=wechat`, configure `IMGCLEAN_SESSION_SECRET`, `WECHAT_APP_ID`, `WECHAT_APP_SECRET`, and `WECHAT_REDIRECT_URI`, then set the frontend to:
+Create a Website App in WeChat Open Platform, apply for Website WeChat Login, and wait for review. The app must provide a callback domain that matches the backend callback URL host. For the current Vercel API deployment:
+
+```text
+Callback URL: https://imgclean-api.vercel.app/api/auth/wechat/callback
+Callback domain: imgclean-api.vercel.app
+```
+
+Set the backend to `IMGCLEAN_AUTH_MODE=wechat`, configure `IMGCLEAN_SESSION_SECRET`, `WECHAT_APP_ID`, `WECHAT_APP_SECRET`, and either `WECHAT_REDIRECT_URI` or `IMGCLEAN_API_BASE_URL`. Keep `APP_BASE_URL` pointed at the frontend because it is used after a successful login redirect. Then set the frontend to:
 
 ```bash
 NEXT_PUBLIC_REQUIRE_AUTH=true
 NEXT_PUBLIC_AUTH_PROVIDER=wechat
 ```
 
-The login button redirects to `/api/auth/wechat/login`, which uses the WeChat Open Platform website OAuth scope `snsapi_login`, exchanges the callback code, and sets an `imgclean_session` signed cookie.
+The login button redirects to `/api/auth/wechat/login`, which uses the WeChat Open Platform website OAuth scope `snsapi_login`, carries a signed `state` value for CSRF protection, exchanges the callback `code` server-side with `WECHAT_APP_SECRET`, fetches the WeChat profile, and sets an `imgclean_session` signed cookie.
+
+`GET /api/auth/wechat/status` reports whether the backend is configured and returns the callback URL/domain to copy into WeChat Open Platform.
 
 ## Watermark Removal
 
-`POST /api/clean` supports `mode=watermark`. This first implementation is mask/area based: provide either `watermark_box=x,y,w,h` or a `watermark_mask` file where white pixels mark the watermark area. Arbitrary automatic watermark detection is intentionally left for a model-backed follow-up.
+`POST /api/clean` supports `mode=watermark`. It auto-detects likely visible text watermarks and inpaints the mask with OpenCV when available. For difficult images, callers can still provide either `watermark_box=x,y,w,h` or a `watermark_mask` file where white pixels mark the watermark area.
 
 ## Frontend environment
 

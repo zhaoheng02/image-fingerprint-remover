@@ -61,6 +61,7 @@ class WebSettings:
     stripe_price_starter: str
     stripe_price_growth: str
     stripe_api_base_url: str
+    api_base_url: str
     app_base_url: str
     cors_origins: tuple[str, ...]
     cors_origin_regex: str
@@ -103,6 +104,7 @@ class WebSettings:
             stripe_price_starter=os.environ.get("STRIPE_PRICE_STARTER", ""),
             stripe_price_growth=os.environ.get("STRIPE_PRICE_GROWTH", ""),
             stripe_api_base_url=os.environ.get("STRIPE_API_BASE_URL", "https://api.stripe.com"),
+            api_base_url=os.environ.get("IMGCLEAN_API_BASE_URL", os.environ.get("API_BASE_URL", "")),
             app_base_url=os.environ.get(
                 "APP_BASE_URL",
                 os.environ.get("PUBLIC_APP_URL", os.environ.get("FRONTEND_URL", "http://127.0.0.1:3000")),
@@ -163,7 +165,7 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/api/auth/wechat/status")
-    def wechat_status() -> dict[str, Any]:
+    def wechat_status(request: Request) -> dict[str, Any]:
         missing = []
         if not settings.wechat_app_id:
             missing.append("WECHAT_APP_ID")
@@ -171,10 +173,13 @@ def create_app() -> FastAPI:
             missing.append("WECHAT_APP_SECRET")
         if not settings.session_secret:
             missing.append("IMGCLEAN_SESSION_SECRET")
+        callback_url = _wechat_redirect_uri(settings, request)
         return {
             "provider": "wechat",
             "configured": not missing,
             "missing": missing,
+            "callback_url": callback_url,
+            "callback_domain": urlparse(callback_url).netloc,
         }
 
     @app.post("/api/clean")
@@ -220,12 +225,12 @@ def create_app() -> FastAPI:
         return {"mode": mode, "results": results}
 
     @app.get("/api/auth/wechat/login")
-    def wechat_login(return_to: str = "") -> RedirectResponse:
+    def wechat_login(request: Request, return_to: str = "") -> RedirectResponse:
         if not settings.wechat_app_id or not settings.wechat_app_secret:
             raise HTTPException(status_code=503, detail="WeChat OAuth is not configured.")
         if not settings.session_secret:
             raise HTTPException(status_code=503, detail="Session secret is not configured.")
-        redirect_uri = settings.wechat_redirect_uri or f"{settings.app_base_url.rstrip('/')}/api/auth/wechat/callback"
+        redirect_uri = _wechat_redirect_uri(settings, request)
         state = create_session_token(
             {
                 "kind": "wechat_oauth_state",
@@ -635,6 +640,23 @@ def _safe_return_to(return_to: str, app_base_url: str) -> str:
     if return_to.startswith("/"):
         return f"{app_base_url.rstrip('/')}{return_to}"
     return fallback
+
+
+def _wechat_redirect_uri(settings: WebSettings, request: Request) -> str:
+    if settings.wechat_redirect_uri:
+        return settings.wechat_redirect_uri
+    if settings.api_base_url:
+        return f"{settings.api_base_url.rstrip('/')}/api/auth/wechat/callback"
+    return f"{_external_base_url(request)}/api/auth/wechat/callback"
+
+
+def _external_base_url(request: Request) -> str:
+    forwarded_proto = request.headers.get("x-forwarded-proto", "")
+    proto = (forwarded_proto.split(",", 1)[0].strip() if forwarded_proto else request.url.scheme) or "https"
+    forwarded_host = request.headers.get("x-forwarded-host", "")
+    host = (forwarded_host.split(",", 1)[0].strip() if forwarded_host else request.headers.get("host", ""))
+    host = host or request.url.netloc
+    return f"{proto}://{host}".rstrip("/")
 
 
 async def _maybe_await(value: Any) -> Any:
