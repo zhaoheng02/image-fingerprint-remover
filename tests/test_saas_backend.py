@@ -12,6 +12,7 @@ from PIL import Image, ImageDraw
 
 from imgclean_web.billing import CheckoutSession
 from imgclean_web.app import create_app
+from imgclean_web.session import create_session_token
 from imgclean_web.storage import SupabaseStorage
 
 
@@ -371,6 +372,106 @@ def test_wechat_login_redirect_uses_api_callback_from_request(tmp_path, monkeypa
     assert params["scope"] == ["snsapi_login"]
     assert "state" in params
     assert parsed.fragment == "wechat_redirect"
+
+
+def test_wechat_miniprogram_status_reports_configuration(tmp_path, monkeypatch):
+    for key in ("WECHAT_MINIPROGRAM_APP_ID", "WECHAT_MINIPROGRAM_APP_SECRET", "IMGCLEAN_SESSION_SECRET"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("IMGCLEAN_WEB_DATA_DIR", str(tmp_path / "web-data"))
+    client = TestClient(create_app())
+
+    response = client.get("/api/auth/wechat-miniprogram/status")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "provider": "wechat_miniprogram",
+        "configured": False,
+        "missing": ["WECHAT_MINIPROGRAM_APP_ID", "WECHAT_MINIPROGRAM_APP_SECRET", "IMGCLEAN_SESSION_SECRET"],
+    }
+
+
+def test_wechat_miniprogram_login_returns_bearer_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("IMGCLEAN_WEB_DATA_DIR", str(tmp_path / "web-data"))
+    monkeypatch.setenv("IMGCLEAN_AUTH_MODE", "wechat_miniprogram")
+    monkeypatch.setenv("IMGCLEAN_LEDGER_BACKEND", "local")
+    monkeypatch.setenv("IMGCLEAN_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("IMGCLEAN_CREDITS_ENABLED", "false")
+    monkeypatch.setenv("IMGCLEAN_SESSION_SECRET", "session-secret")
+    monkeypatch.setenv("WECHAT_MINIPROGRAM_APP_ID", "wx-mini-app")
+    monkeypatch.setenv("WECHAT_MINIPROGRAM_APP_SECRET", "mini-secret")
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"openid": "openid-123", "unionid": "union-456", "session_key": "do-not-return"}
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, params):
+            assert url == "https://api.weixin.qq.com/sns/jscode2session"
+            assert params == {
+                "appid": "wx-mini-app",
+                "secret": "mini-secret",
+                "js_code": "wx-login-code",
+                "grant_type": "authorization_code",
+            }
+            return FakeResponse()
+
+    monkeypatch.setattr("imgclean_web.app.httpx.AsyncClient", FakeAsyncClient)
+    client = TestClient(create_app())
+
+    response = client.post("/api/auth/wechat-miniprogram/login", json={"code": "wx-login-code"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["provider"] == "wechat_miniprogram"
+    assert payload["token_type"] == "Bearer"
+    assert payload["user_id"] == "wechat_mp:openid-123"
+    assert payload["openid"] == "openid-123"
+    assert "session_key" not in payload
+
+    me = client.get("/api/me", headers={"authorization": f"Bearer {payload['token']}"})
+    assert me.status_code == 200
+    assert me.json()["authenticated"] is True
+    assert me.json()["user_id"] == "wechat_mp:openid-123"
+    assert me.json()["credits"] is None
+
+
+def test_wechat_miniprogram_clean_skips_credits_when_billing_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("IMGCLEAN_WEB_DATA_DIR", str(tmp_path / "web-data"))
+    monkeypatch.setenv("IMGCLEAN_AUTH_MODE", "wechat_miniprogram")
+    monkeypatch.setenv("IMGCLEAN_LEDGER_BACKEND", "local")
+    monkeypatch.setenv("IMGCLEAN_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("IMGCLEAN_INITIAL_CREDITS", "0")
+    monkeypatch.setenv("IMGCLEAN_CREDITS_ENABLED", "false")
+    monkeypatch.setenv("IMGCLEAN_SESSION_SECRET", "session-secret")
+    token = create_session_token(
+        {"sub": "wechat_mp:openid-123", "provider": "wechat_miniprogram"},
+        "session-secret",
+    )
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/clean",
+        headers={"authorization": f"Bearer {token}"},
+        data={"mode": "safe"},
+        files=[("files", ("dirty.png", _make_dirty_png(), "image/png"))],
+    )
+
+    assert response.status_code == 200
+    result = response.json()["results"][0]
+    assert result["ok"] is True
+    assert result["credits_remaining"] is None
 
 
 def test_supabase_storage_uploads_and_returns_signed_url(monkeypatch):

@@ -104,6 +104,8 @@ Recommended production setup: put HTTPS, request-size limits, rate limiting, and
 - `IMGCLEAN_MAX_UPLOAD_MB` — per-file upload limit, defaults to `25`
 - `IMGCLEAN_JOB_TTL_SECONDS` — cleaned download cache TTL, defaults to `21600`
 - `IMGCLEAN_AUTH_MODE=wechat` plus `WECHAT_APP_ID`, `WECHAT_APP_SECRET`, `IMGCLEAN_SESSION_SECRET`, and either `WECHAT_REDIRECT_URI` or `IMGCLEAN_API_BASE_URL` — enable WeChat QR OAuth login
+- `IMGCLEAN_AUTH_MODE=wechat_miniprogram` plus `WECHAT_MINIPROGRAM_APP_ID`, `WECHAT_MINIPROGRAM_APP_SECRET`, and `IMGCLEAN_SESSION_SECRET` — enable Mini Program `wx.login` authentication
+- `IMGCLEAN_CREDITS_ENABLED=false` — disable credit deduction for no-payment deployments
 
 ## What it detects
 

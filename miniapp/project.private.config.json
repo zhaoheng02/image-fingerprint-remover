@@ -1,0 +1,6 @@
+{
+  "description": "Local developer settings. Replace appid in project.config.json after registering the mini program.",
+  "setting": {
+    "compileHotReLoad": true
+  }
+}

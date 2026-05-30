@@ -46,6 +46,8 @@ Required secrets:
 - `imgclean-session-secret` -> `IMGCLEAN_SESSION_SECRET`
 - `imgclean-wechat-app-id` -> `WECHAT_APP_ID`
 - `imgclean-wechat-app-secret` -> `WECHAT_APP_SECRET`
+- `imgclean-wechat-miniprogram-app-id` -> `WECHAT_MINIPROGRAM_APP_ID`
+- `imgclean-wechat-miniprogram-app-secret` -> `WECHAT_MINIPROGRAM_APP_SECRET`
 
 The Cloud Run service template in `deploy/cloud-run-service.yaml` reads these from Google Secret Manager. Create each secret before applying the service YAML, then replace `IMAGE_PLACEHOLDER` with the pushed container image.
 
@@ -71,6 +73,24 @@ The login button redirects to `/api/auth/wechat/login`, which uses the WeChat Op
 
 `GET /api/auth/wechat/status` reports whether the backend is configured and returns the callback URL/domain to copy into WeChat Open Platform.
 
+## WeChat Mini Program
+
+For the no-payment MVP, use `miniapp/` as the WeChat Mini Program client. It calls `wx.login()`, posts the returned code to `/api/auth/wechat-miniprogram/login`, receives a Bearer token, and sends that token with `wx.uploadFile` requests to `/api/clean`. This follows the WeChat Mini Program login flow documented at `https://developers.weixin.qq.com/miniprogram/dev/framework/open-ability/login.html` and the `code2Session` endpoint documented at `https://developers.weixin.qq.com/miniprogram/dev/OpenApiDoc/user-login/code2Session.html`.
+
+Backend variables:
+
+```bash
+IMGCLEAN_AUTH_MODE=wechat_miniprogram
+IMGCLEAN_CREDITS_ENABLED=false
+WECHAT_MINIPROGRAM_APP_ID=<mini program appid>
+WECHAT_MINIPROGRAM_APP_SECRET=<mini program appsecret>
+IMGCLEAN_SESSION_SECRET=<random secret>
+```
+
+If the Mini Program AppID/AppSecret is not ready yet, keep `IMGCLEAN_AUTH_MODE=none`; the mini program can still upload anonymously, but the login button will show that Mini Program login is not configured.
+
+In the Mini Program admin console, add `https://imgclean-api.vercel.app` to the request, uploadFile, and downloadFile legal domains; WeChat documents these network domain requirements at `https://developers.weixin.qq.com/miniprogram/dev/framework/ability/network.html`. The client proxies cross-origin cleaned file downloads through `/api/download`, so the mini program only needs to whitelist the API domain.
+
 ## Watermark Removal
 
 `POST /api/clean` supports `mode=watermark`. It auto-detects likely visible text watermarks and inpaints the mask with OpenCV when available. For difficult images, callers can still provide either `watermark_box=x,y,w,h` or a `watermark_mask` file where white pixels mark the watermark area.
@@ -87,7 +107,7 @@ Lemon Squeezy remains supported through `/api/webhooks/lemonsqueezy` for orders 
 
 - Google Cloud project with billing enabled for Cloud Run.
 - Cloudflare R2 bucket and S3 API token.
-- Stripe account in live mode, or Lemon Squeezy store and signed webhook.
+- Stripe account in live mode, or Lemon Squeezy store and signed webhook, only if billing is enabled.
 
 ## Local development
 

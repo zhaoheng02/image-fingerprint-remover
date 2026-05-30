@@ -1,0 +1,46 @@
+<view class="page">
+  <view class="hero">
+    <text class="title">ImgClean</text>
+    <text class="subtitle">图片指纹清理 / 去水印</text>
+  </view>
+
+  <view class="panel">
+    <view class="row">
+      <view>
+        <text class="label">微信登录</text>
+        <text class="hint">{{loggedIn ? "已登录，可记录用户身份" : "可先匿名试用，配置小程序密钥后再登录"}}</text>
+      </view>
+      <button class="small" bindtap="login" loading="{{loginBusy}}">{{loggedIn ? "刷新登录" : "登录"}}</button>
+    </view>
+  </view>
+
+  <view class="panel">
+    <text class="label">处理模式</text>
+    <picker mode="selector" range="{{modeLabels}}" value="{{modeIndex}}" bindchange="onModeChange">
+      <view class="select">{{modeLabels[modeIndex]}}</view>
+    </picker>
+
+    <view class="upload" bindtap="chooseImage">
+      <image wx:if="{{filePath}}" class="preview" mode="aspectFit" src="{{filePath}}" />
+      <view wx:else class="placeholder">
+        <text>选择图片</text>
+        <text class="hint">支持 PNG / JPEG，可从相册或相机选择</text>
+      </view>
+    </view>
+
+    <button class="primary" bindtap="uploadImage" loading="{{busy}}" disabled="{{!filePath || busy}}">开始处理</button>
+  </view>
+
+  <view class="panel" wx:if="{{result}}">
+    <text class="label">结果</text>
+    <view class="result-row">
+      <text>{{result.filename}}</text>
+      <text class="ok">{{result.output.finding_count}} 项残留</text>
+    </view>
+    <button class="primary secondary" bindtap="downloadResult" loading="{{downloadBusy}}">下载 / 预览清理图</button>
+  </view>
+
+  <view class="message" wx:if="{{message}}">
+    <text>{{message}}</text>
+  </view>
+</view>

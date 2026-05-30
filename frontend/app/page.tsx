@@ -1,5 +1,6 @@
 import { ArrowRight, Database, FileImage, ShieldCheck, Zap } from "lucide-react";
 import Link from "next/link";
+import { config } from "../lib/config";
 
 export default function HomePage() {
   return (
@@ -7,18 +8,20 @@ export default function HomePage() {
       <Header />
       <section className="wrap hero">
         <div>
-          <h1>Image privacy cleanup for paid creator workflows</h1>
+          <h1>Image privacy cleanup for creator workflows</h1>
           <p>
-            Upload PNG and JPEG files, remove embedded identifiers, track usage credits,
-            and deliver cleaned files through a production SaaS stack.
+            Upload PNG and JPEG files, remove embedded identifiers, and deliver cleaned
+            files through a hosted API or WeChat Mini Program.
           </p>
           <div className="hero-actions">
             <Link className="button primary" href="/dashboard">
               Open app <ArrowRight size={17} />
             </Link>
-            <Link className="button secondary" href="/pricing">
-              View pricing
-            </Link>
+            {config.billingEnabled ? (
+              <Link className="button secondary" href="/pricing">
+                View pricing
+              </Link>
+            ) : null}
           </div>
         </div>
         <div className="product-panel" aria-label="ImgClean product preview">
@@ -36,8 +39,8 @@ export default function HomePage() {
               <span className="chip">clean</span>
             </div>
             <div className="metric-row">
-              <span>Supabase credits</span>
-              <strong>24</strong>
+              <span>Mini Program mode</span>
+              <strong>free</strong>
             </div>
             <div className="metric-row">
               <span>R2 signed download</span>
@@ -50,7 +53,7 @@ export default function HomePage() {
         <h2>Production pieces</h2>
         <div className="grid">
           <Feature icon={<ShieldCheck size={24} />} title="Privacy engine" text="The existing offline cleaner runs as a Cloud Run container." />
-          <Feature icon={<Database size={24} />} title="Usage ledger" text="Supabase stores users, credits, usage events, and orders." />
+          <Feature icon={<Database size={24} />} title="Usage ledger" text="Supabase can store users and usage events when authentication is enabled." />
           <Feature icon={<FileImage size={24} />} title="R2 storage" text="Original and cleaned files can be stored with short-lived download URLs." />
         </div>
       </section>
@@ -66,8 +69,8 @@ function Header() {
         ImgClean
       </Link>
       <nav className="nav-links">
-        <Link className="nav-link" href="/pricing">Pricing</Link>
-        <Link className="nav-link" href="/login">Login</Link>
+        {config.billingEnabled ? <Link className="nav-link" href="/pricing">Pricing</Link> : null}
+        {config.requireAuth ? <Link className="nav-link" href="/login">Login</Link> : null}
         <Link className="button secondary" href="/dashboard">Dashboard</Link>
       </nav>
     </header>

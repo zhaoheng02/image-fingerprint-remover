@@ -33,7 +33,7 @@ class Authenticator:
             return User(user_id=user_id, email=request.headers.get("x-user-email", ""))
         if self.mode == "supabase":
             return await self._supabase_user(request)
-        if self.mode == "wechat":
+        if self.mode in {"wechat", "wechat_miniprogram"}:
             return self._session_user(request)
         raise HTTPException(status_code=500, detail=f"Unsupported auth mode: {self.mode}")
 
@@ -58,9 +58,16 @@ class Authenticator:
         return User(user_id=data["id"], email=data.get("email", ""))
 
     def _session_user(self, request: Request) -> User:
-        token = request.cookies.get("imgclean_session", "")
+        token = request.cookies.get("imgclean_session", "") or _bearer_token(request)
         try:
             data = read_session_token(token, self.session_secret)
         except InvalidSession:
             raise HTTPException(status_code=401, detail="Login required.")
         return User(user_id=data["sub"], email=data.get("email", ""), name=data.get("name", ""))
+
+
+def _bearer_token(request: Request) -> str:
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth.split(" ", 1)[1].strip()
+    return ""

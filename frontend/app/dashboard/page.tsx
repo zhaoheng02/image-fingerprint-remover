@@ -157,7 +157,7 @@ export default function DashboardPage() {
           ImgClean
         </Link>
         <nav className="nav-links">
-          <Link className="nav-link" href="/pricing">Pricing</Link>
+          {config.billingEnabled ? <Link className="nav-link" href="/pricing">Pricing</Link> : null}
           {config.requireAuth ? (
             <button className="button secondary" type="button" onClick={signOut}><LogOut size={16} /> Sign out</button>
           ) : null}

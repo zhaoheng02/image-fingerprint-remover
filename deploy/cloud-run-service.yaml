@@ -30,6 +30,8 @@ spec:
               value: supabase
             - name: IMGCLEAN_STORAGE_BACKEND
               value: r2
+            - name: IMGCLEAN_CREDITS_ENABLED
+              value: "false"
             - name: IMGCLEAN_MAX_UPLOAD_MB
               value: "25"
             - name: IMGCLEAN_JOB_TTL_SECONDS
@@ -102,4 +104,14 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: imgclean-wechat-app-secret
+                  key: latest
+            - name: WECHAT_MINIPROGRAM_APP_ID
+              valueFrom:
+                secretKeyRef:
+                  name: imgclean-wechat-miniprogram-app-id
+                  key: latest
+            - name: WECHAT_MINIPROGRAM_APP_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: imgclean-wechat-miniprogram-app-secret
                   key: latest

@@ -37,6 +37,7 @@ WEB_MODES = set(VALID_MODES) | {"watermark"}
 WECHAT_AUTH_URL = "https://open.weixin.qq.com/connect/qrconnect"
 WECHAT_TOKEN_URL = "https://api.weixin.qq.com/sns/oauth2/access_token"
 WECHAT_USERINFO_URL = "https://api.weixin.qq.com/sns/userinfo"
+WECHAT_MINIPROGRAM_SESSION_URL = "https://api.weixin.qq.com/sns/jscode2session"
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,7 @@ class WebSettings:
     ledger_backend: str
     storage_backend: str
     initial_credits: int
+    credits_enabled: bool
     supabase_url: str
     supabase_secret_key: str
     supabase_storage_bucket: str
@@ -69,6 +71,8 @@ class WebSettings:
     wechat_app_id: str
     wechat_app_secret: str
     wechat_redirect_uri: str
+    wechat_miniprogram_app_id: str
+    wechat_miniprogram_app_secret: str
 
     @classmethod
     def from_env(cls) -> "WebSettings":
@@ -91,6 +95,7 @@ class WebSettings:
             ledger_backend=os.environ.get("IMGCLEAN_LEDGER_BACKEND", "local"),
             storage_backend=os.environ.get("IMGCLEAN_STORAGE_BACKEND", "local"),
             initial_credits=int(os.environ.get("IMGCLEAN_INITIAL_CREDITS", "0")),
+            credits_enabled=_env_bool(os.environ.get("IMGCLEAN_CREDITS_ENABLED", "true")),
             supabase_url=os.environ.get("SUPABASE_URL", ""),
             supabase_secret_key=os.environ.get("SUPABASE_SECRET_KEY", ""),
             supabase_storage_bucket=os.environ.get("SUPABASE_STORAGE_BUCKET", "imgclean-files"),
@@ -115,6 +120,8 @@ class WebSettings:
             wechat_app_id=os.environ.get("WECHAT_APP_ID", ""),
             wechat_app_secret=os.environ.get("WECHAT_APP_SECRET", ""),
             wechat_redirect_uri=os.environ.get("WECHAT_REDIRECT_URI", ""),
+            wechat_miniprogram_app_id=os.environ.get("WECHAT_MINIPROGRAM_APP_ID", ""),
+            wechat_miniprogram_app_secret=os.environ.get("WECHAT_MINIPROGRAM_APP_SECRET", ""),
         )
 
 
@@ -155,6 +162,14 @@ def create_app() -> FastAPI:
         user = await app.state.auth.current_user(request)
         if user is None:
             return {"authenticated": False, "credits": None}
+        if not settings.credits_enabled:
+            return {
+                "authenticated": True,
+                "user_id": user.user_id,
+                "email": user.email,
+                "name": user.name,
+                "credits": None,
+            }
         account = await _maybe_await(app.state.ledger.get_account(user))
         return {
             "authenticated": True,
@@ -162,6 +177,69 @@ def create_app() -> FastAPI:
             "email": account.email,
             "name": user.name,
             "credits": account.credits,
+        }
+
+    @app.get("/api/auth/wechat-miniprogram/status")
+    def wechat_miniprogram_status() -> dict[str, Any]:
+        missing = []
+        if not settings.wechat_miniprogram_app_id:
+            missing.append("WECHAT_MINIPROGRAM_APP_ID")
+        if not settings.wechat_miniprogram_app_secret:
+            missing.append("WECHAT_MINIPROGRAM_APP_SECRET")
+        if not settings.session_secret:
+            missing.append("IMGCLEAN_SESSION_SECRET")
+        return {
+            "provider": "wechat_miniprogram",
+            "configured": not missing,
+            "missing": missing,
+        }
+
+    @app.post("/api/auth/wechat-miniprogram/login")
+    async def wechat_miniprogram_login(request: Request) -> dict[str, Any]:
+        if not settings.wechat_miniprogram_app_id or not settings.wechat_miniprogram_app_secret:
+            raise HTTPException(status_code=503, detail="WeChat Mini Program login is not configured.")
+        if not settings.session_secret:
+            raise HTTPException(status_code=503, detail="Session secret is not configured.")
+        payload = await request.json()
+        code = str(payload.get("code") or "").strip()
+        if not code:
+            raise HTTPException(status_code=400, detail="Missing wx.login code.")
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            session_response = await client.get(
+                WECHAT_MINIPROGRAM_SESSION_URL,
+                params={
+                    "appid": settings.wechat_miniprogram_app_id,
+                    "secret": settings.wechat_miniprogram_app_secret,
+                    "js_code": code,
+                    "grant_type": "authorization_code",
+                },
+            )
+            session_response.raise_for_status()
+            session_payload = session_response.json()
+        if "errcode" in session_payload:
+            raise HTTPException(status_code=401, detail=session_payload.get("errmsg", "WeChat Mini Program login failed."))
+        openid = str(session_payload.get("openid") or "")
+        if not openid:
+            raise HTTPException(status_code=401, detail="WeChat Mini Program login did not return openid.")
+
+        user_id = f"wechat_mp:{openid}"
+        token = create_session_token(
+            {
+                "sub": user_id,
+                "provider": "wechat_miniprogram",
+                "openid": openid,
+                "unionid": session_payload.get("unionid", ""),
+            },
+            settings.session_secret,
+        )
+        return {
+            "provider": "wechat_miniprogram",
+            "token_type": "Bearer",
+            "token": token,
+            "expires_in": 30 * 24 * 60 * 60,
+            "user_id": user_id,
+            "openid": openid,
         }
 
     @app.get("/api/auth/wechat/status")
@@ -544,7 +622,7 @@ async def _process_upload(
     output_report = inspect_file(output_path)
 
     credits_remaining = None
-    if user is not None:
+    if user is not None and settings.credits_enabled:
         credits_remaining = await _maybe_await(
             ledger.consume_credit(
                 user,
@@ -557,7 +635,7 @@ async def _process_upload(
                 },
             )
         )
-    else:
+    if user is None:
         # Keep only the cleaned file for anonymous/local download; the original upload is not retained.
         input_path.unlink(missing_ok=True)
 
@@ -627,6 +705,10 @@ def _build_billing(settings: WebSettings) -> StripeBilling:
         settings.stripe_price_growth,
         settings.stripe_api_base_url,
     )
+
+
+def _env_bool(value: str) -> bool:
+    return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
 def _safe_return_to(return_to: str, app_base_url: str) -> str:
