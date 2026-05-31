@@ -55,11 +55,13 @@ Collection rules:
 3. For every post, extract these raw fields exactly: id or canonical URL, author display name, author handle, relative/absolute publish time, original text, quote author/text when present, original post URL, image URLs, and video URLs.
 4. For avatars, use an already visible/easy profile avatar URL when available. Do not open image tabs or spend extra steps trying to obtain direct avatar URLs; omitting avatar_url is acceptable.
 5. Download or keep Airtap live URLs for images/videos when possible. Do not summarize posts in Airtap; the backend owns formatting, dedupe, and WeChat delivery.
-6. For profiles with display names/handles, call:
+6. Backend calls are a hard gate. Use Termux/curl or another reliable HTTP client on the cloud phone. Do not use browser page text as a substitute for an API response. Do not compose Xiaohongshu content yourself.
+7. For every account you visited, call `/api/airtap/profiles/upsert` with the display name and handle you observed, even when avatar_url is omitted:
    POST {args.api_base.rstrip("/")}/api/airtap/profiles/upsert
    Headers: content-type: application/json, x-airtap-secret: {secret}
-   Body: {{"profiles":[{{"display_name":"...","handle":"...","avatar_url":"optional"}}]}}
-7. Then call:
+   Body: {{"profiles":[{{"display_name":"...","handle":"..."}}]}}
+   This call must return HTTP 200 before you continue.
+8. Then call:
    POST {args.api_base.rstrip("/")}/api/airtap/posts/publish
    Headers: content-type: application/json, x-airtap-secret: {secret}
    Body shape:
@@ -80,14 +82,16 @@ Collection rules:
        }}
      ]
    }}
-8. If response.new_count is 0, stop. WeChat will not be pushed and Xiaohongshu should not be posted.
-9. If response.new_count is greater than 0, WeChat has already been pushed by the backend. Open Xiaohongshu and create a note using:
+9. The publish call must return HTTP 200 JSON. In your final report include the exact values of response.new_count, response.duplicate_count, pushes.wechat.ok/reason, and channels.xiaohongshu.title.
+10. If the backend response is missing, non-200, or cannot be parsed, stop and report the backend error. Do not open Xiaohongshu and do not generate local replacement copy.
+11. If response.new_count is 0, stop. WeChat will not be pushed and Xiaohongshu should not be posted.
+12. If response.new_count is greater than 0, WeChat has already been pushed by the backend. Open Xiaohongshu and create a note using exactly:
    - title: response.channels.xiaohongshu.title
    - body: response.channels.xiaohongshu.body
    - hashtags: response.channels.xiaohongshu.hashtags
    - media: attach the collected local images/videos when the app allows it; otherwise leave the media links in the body.
-10. {final_publish}
-11. Report the backend publish response summary, Xiaohongshu publish/draft result, and any blocked step. Never expose PushPlus token, OpenAI key, or the relay secret in the final report.
+13. {final_publish}
+14. Report the backend publish response summary, Xiaohongshu publish/draft result, and any blocked step. Never expose PushPlus token, OpenAI key, or the relay secret in the final report.
 """
     )
 
