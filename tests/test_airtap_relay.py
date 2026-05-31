@@ -195,7 +195,7 @@ def test_airtap_posts_render_enriches_profiles_without_marking_seen(tmp_path, mo
     assert "<table" not in rendered["channels"]["wechat"]["content"]
     assert "Airtap 自动抓取" in rendered["channels"]["wechat"]["content"]
     assert "原文链接（备用）" in rendered["channels"]["wechat"]["content"]
-    assert '<img src="data:image/jpeg;base64,' in rendered["channels"]["wechat"]["content"]
+    assert '<img src="/api/airtap/media/' in rendered["channels"]["wechat"]["content"]
     assert '<img src="https://airtap.ai/content/live/android-files/chart.png"' not in rendered["channels"]["wechat"]["content"]
     assert "/api/airtap/avatars/" not in rendered["channels"]["wechat"]["content"]
     assert rendered["channels"]["xiaohongshu"]["format"] == "note"
@@ -215,7 +215,7 @@ def test_airtap_posts_render_enriches_profiles_without_marking_seen(tmp_path, mo
     assert second_preview.json()["duplicate_count"] == 0
 
 
-def test_airtap_posts_render_inlines_avatar_and_media_separately(tmp_path, monkeypatch):
+def test_airtap_posts_render_hosts_avatar_and_media_separately(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     image_bytes = _large_image_bytes()
     media_url = "https://airtap.ai/content/live/android-files/shared-large.png"
@@ -264,8 +264,97 @@ def test_airtap_posts_render_inlines_avatar_and_media_separately(tmp_path, monke
 
     assert response.status_code == 200
     content = response.json()["channels"]["wechat"]["content"]
-    assert content.count('src="data:image/jpeg;base64,') >= 2
+    assert content.count('src="/api/airtap/media/') >= 2
     assert '<img src="https://' not in content
+
+
+def test_airtap_posts_render_uses_pushplus_image_service_when_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("IMGCLEAN_WEB_DATA_DIR", str(tmp_path / "web-data"))
+    monkeypatch.setenv("IMGCLEAN_AUTH_MODE", "none")
+    monkeypatch.setenv("IMGCLEAN_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("AIRTAP_RELAY_SECRET", "relay-secret")
+    monkeypatch.setenv("PUSHPLUS_ACCESS_KEY", "pushplus-access-key")
+    image_bytes = _large_image_bytes()
+    media_url = "https://airtap.ai/content/live/android-files/chart.png"
+    calls = []
+
+    class FakeImageResponse:
+        content = image_bytes
+        headers = {"content-type": "image/png"}
+
+        def raise_for_status(self):
+            return None
+
+    class FakeTokenResponse:
+        headers = {"content-type": "application/json"}
+        content = b""
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"code": 200, "data": {"uploadUrl": "https://upload.pushplus.test", "token": "upload-token"}}
+
+    class FakeUploadResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"url": "https://pic.pushplus.plus/airtap/chart.jpg"}
+
+    class FakeAsyncClient:
+        def __init__(self, timeout, follow_redirects=False):
+            self.timeout = timeout
+            self.follow_redirects = follow_redirects
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url, headers=None):
+            calls.append(("GET", url, headers))
+            if url == "https://www.pushplus.plus/api/open/userImage/uploadToken":
+                assert headers == {"access-key": "pushplus-access-key"}
+                return FakeTokenResponse()
+            assert url == media_url
+            return FakeImageResponse()
+
+        async def post(self, url, data=None, files=None, **kwargs):
+            calls.append(("POST", url, data, bool(files), kwargs))
+            assert url == "https://upload.pushplus.test"
+            assert data == {"token": "upload-token"}
+            assert files
+            return FakeUploadResponse()
+
+    monkeypatch.setattr("imgclean_web.app.httpx.AsyncClient", FakeAsyncClient)
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/airtap/posts/render",
+        headers={"x-airtap-secret": "relay-secret"},
+        json={
+            "scope": "x-pushplus-image-service",
+            "channels": ["wechat"],
+            "posts": [
+                {
+                    "id": "tweet-pushplus-image-1",
+                    "author_name": "xiao mu",
+                    "text": "正文图应该走 PushPlus 图床。",
+                    "image_urls": [media_url],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    content = response.json()["channels"]["wechat"]["content"]
+    assert 'src="https://pic.pushplus.plus/airtap/chart.jpg"' in content
+    assert 'src="data:image/' not in content
+    assert "/api/airtap/media/" not in content
+    assert "图片素材" not in content
+    assert [call[0] for call in calls] == ["GET", "GET", "POST"]
 
 
 def test_airtap_posts_render_does_not_prevent_later_publish(tmp_path, monkeypatch):
@@ -314,6 +403,61 @@ def test_airtap_posts_render_does_not_prevent_later_publish(tmp_path, monkeypatc
     assert published.json()["new_count"] == 1
     assert published.json()["pushes"]["wechat"]["ok"] is True
     assert len(calls) == 1
+
+
+def test_airtap_debug_summary_reports_profiles_and_seen_posts(tmp_path, monkeypatch):
+    monkeypatch.setenv("IMGCLEAN_WEB_DATA_DIR", str(tmp_path / "web-data"))
+    monkeypatch.setenv("IMGCLEAN_AUTH_MODE", "none")
+    monkeypatch.setenv("IMGCLEAN_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("AIRTAP_RELAY_SECRET", "relay-secret")
+    monkeypatch.setenv("PUSHPLUS_TOKEN", "push-token")
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"code": 200, "msg": "请求成功"}
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, headers, json):
+            return FakeResponse()
+
+    monkeypatch.setattr("imgclean_web.app.httpx.AsyncClient", FakeAsyncClient)
+    client = TestClient(create_app())
+    client.post(
+        "/api/airtap/profiles/upsert",
+        headers={"x-airtap-secret": "relay-secret"},
+        json={"profiles": [{"display_name": "Art", "handle": "ArtofSpecuycky"}]},
+    )
+    client.post(
+        "/api/airtap/posts/publish",
+        headers={"x-airtap-secret": "relay-secret"},
+        json={
+            "scope": "x-hourly-watch",
+            "channels": ["wechat"],
+            "posts": [{"id": "tweet-summary-1", "author_handle": "ArtofSpecuycky", "text": "summary"}],
+        },
+    )
+
+    response = client.get("/api/airtap/debug/summary", headers={"x-airtap-secret": "relay-secret"})
+
+    assert response.status_code == 200
+    summary = response.json()["summary"]
+    assert summary["profile_count"] == 1
+    assert summary["alias_count"] == 2
+    assert summary["profiles"][0]["handle"] == "ArtofSpecuycky"
+    assert summary["seen_scopes"]["x-hourly-watch"]["count"] == 1
+    assert summary["seen_scopes"]["x-hourly-watch"]["recent"][0]["author_name"] == "Art"
 
 
 def test_airtap_posts_render_uses_ai_composer_when_configured(tmp_path, monkeypatch):

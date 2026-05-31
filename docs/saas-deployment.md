@@ -47,6 +47,7 @@ Required secrets:
 - `imgclean-airtap-relay-secret` -> `AIRTAP_RELAY_SECRET`
 - `imgclean-openai-api-key` -> `OPENAI_API_KEY`
 - `imgclean-pushplus-token` -> `PUSHPLUS_TOKEN`
+- `imgclean-pushplus-access-key` -> `PUSHPLUS_ACCESS_KEY` (optional, enables PushPlus image hosting)
 - `imgclean-wechat-app-id` -> `WECHAT_APP_ID`
 - `imgclean-wechat-app-secret` -> `WECHAT_APP_SECRET`
 - `imgclean-wechat-miniprogram-app-id` -> `WECHAT_MINIPROGRAM_APP_ID`
@@ -107,12 +108,15 @@ OPENAI_BASE_URL=https://api.xairouter.com
 OPENAI_API_KEY=<router or OpenAI key>
 AIRTAP_AI_MODEL=gpt-5.5
 AIRTAP_STORAGE_BUCKET=imgclean-airtap
+AIRTAP_SIGNED_URL_TTL_SECONDS=259200
 PUSHPLUS_TOKEN=<pushplus token>
+PUSHPLUS_ACCESS_KEY=<optional pushplus access-key for image hosting>
 PUSHPLUS_ENDPOINT=https://www.pushplus.plus/send
+PUSHPLUS_UPLOAD_TOKEN_ENDPOINT=https://www.pushplus.plus/api/open/userImage/uploadToken
 PUSHPLUS_TOPIC=<optional topic>
 ```
 
-Use `AIRTAP_AI_ENABLED=false` to keep deterministic rendering only. With Supabase storage enabled, avatar files and `airtap/state.json` are persisted in `AIRTAP_STORAGE_BUCKET` so the relay can store JSON state separately from image-only upload buckets; local mode stores them under `IMGCLEAN_WEB_DATA_DIR/airtap`. PushPlus documents `POST https://www.pushplus.plus/send` with JSON fields `token`, `title`, `content`, `topic`, and `template`; this relay uses `template=html` for WeChat pushes.
+Use `AIRTAP_AI_ENABLED=false` to keep deterministic rendering only. With Supabase storage enabled, avatar files, relay media, and `airtap/state.json` are persisted in `AIRTAP_STORAGE_BUCKET` so the relay can store JSON state separately from image-only upload buckets; local mode stores them under `IMGCLEAN_WEB_DATA_DIR/airtap`. PushPlus documents `POST https://www.pushplus.plus/send` with JSON fields `token`, `title`, `content`, `topic`, and `template`; this relay uses `template=html` for WeChat pushes. PushPlus also recommends image hosting instead of local/base64 images in messages, so the relay uploads WeChat images to PushPlus image storage when `PUSHPLUS_ACCESS_KEY` is configured, and otherwise falls back to the backend Airtap media store with 3-day signed URLs.
 
 Upsert profile/avatar mappings:
 
@@ -160,10 +164,12 @@ The response contains `channels.wechat.title`, `channels.wechat.content`, `pushe
 
 `POST /api/airtap/posts/render` remains available for dry runs; it returns channel-ready content without pushing or marking posts as sent. Only `/api/airtap/posts/publish` records the dedupe state.
 
+`GET /api/airtap/debug/summary` returns protected relay state counts, profile aliases, and recent dedupe records for production audits. It requires the same `x-airtap-secret` header and does not expose stored secret values.
+
 Phone-side Airtap publishing contract:
 
-1. Airtap scrapes X only for raw fields: author display name, handle, avatar URL, published time, text, quote, original URL, image URLs, and video URLs.
-2. Airtap calls `/api/airtap/profiles/upsert` whenever it sees a new or refreshed avatar. Do not ask Airtap to maintain the long-term avatar map locally.
+1. Airtap scrapes X only for raw fields: author display name, handle, easily available avatar URL, published time, text, quote, original URL, image URLs, and video URLs.
+2. Airtap calls `/api/airtap/profiles/upsert` for display-name/handle mappings. Avatar URLs are optional; do not ask Airtap to spend extra steps opening image tabs to obtain direct avatar URLs.
 3. Airtap calls `/api/airtap/posts/publish` with `channels=["wechat","xiaohongshu"]`. WeChat delivery is handled by the backend through PushPlus; Airtap must not call PushPlus directly.
 4. If `new_count` is `0`, Airtap stops and posts nothing.
 5. If `new_count` is greater than `0`, Airtap opens Xiaohongshu on the cloud phone, creates a note from `channels.xiaohongshu.title`, `body`, and `hashtags`, attaches the media URLs it collected when the app supports upload from the local files, and publishes through the app. This keeps Xiaohongshu traffic as normal phone interaction while keeping content generation server-side.

@@ -108,8 +108,9 @@ Recommended production setup: put HTTPS, request-size limits, rate limiting, and
 - `IMGCLEAN_CREDITS_ENABLED=false` — disable credit deduction for no-payment deployments
 - `AIRTAP_RELAY_SECRET` — shared secret for Airtap relay endpoints
 - `AIRTAP_STORAGE_BUCKET` — Supabase Storage bucket for Airtap avatar/state persistence; keep it separate from image-only upload buckets
-- `AIRTAP_AI_ENABLED=true`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `AIRTAP_AI_MODEL` — let the relay compose WeChat HTML and Xiaohongshu note copy with an AI model
-- `PUSHPLUS_TOKEN`, optional `PUSHPLUS_TOPIC`, and `PUSHPLUS_ENDPOINT` — let `/api/airtap/posts/publish` push WeChat content through PushPlus
+- `AIRTAP_SIGNED_URL_TTL_SECONDS` — signed Airtap media URL lifetime, defaults to `259200` (3 days)
+- `AIRTAP_AI_ENABLED=true`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `AIRTAP_AI_MODEL` — let the relay compose Xiaohongshu note copy with an AI model; WeChat uses deterministic mobile-safe HTML
+- `PUSHPLUS_TOKEN`, optional `PUSHPLUS_ACCESS_KEY`, `PUSHPLUS_TOPIC`, `PUSHPLUS_ENDPOINT`, and `PUSHPLUS_UPLOAD_TOKEN_ENDPOINT` — let `/api/airtap/posts/publish` push WeChat content through PushPlus; when `PUSHPLUS_ACCESS_KEY` is configured, WeChat images are uploaded to PushPlus image storage before rendering
 
 ## What it detects
 

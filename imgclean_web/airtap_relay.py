@@ -37,6 +37,7 @@ class LocalAirtapRelayStore:
     def __init__(self, data_dir: Path, api_base_url: str = ""):
         self.root = data_dir / "airtap"
         self.avatar_dir = self.root / "avatars"
+        self.media_dir = self.root / "media"
         self.state_path = self.root / "state.json"
         self.api_base_url = api_base_url.rstrip("/")
         self._lock = threading.Lock()
@@ -58,6 +59,50 @@ class LocalAirtapRelayStore:
             if profile is None:
                 return None
             return self.public_profile(profile)
+
+    def summary(self) -> dict[str, Any]:
+        with self._lock:
+            state = self._read()
+            profiles = []
+            for profile in state.get("profiles", {}).values():
+                public = self.public_profile(profile)
+                profiles.append(
+                    {
+                        "display_name": public.get("display_name", ""),
+                        "handle": public.get("handle", ""),
+                        "avatar_url_present": bool(public.get("avatar_url")),
+                        "aliases": public.get("aliases", []),
+                        "updated_at": public.get("updated_at"),
+                    }
+                )
+            seen_scopes = {}
+            for scope, posts in (state.get("seen_posts") or {}).items():
+                if not isinstance(posts, dict):
+                    continue
+                recent_posts = sorted(
+                    posts.values(),
+                    key=lambda item: item.get("first_seen_at", 0) if isinstance(item, dict) else 0,
+                    reverse=True,
+                )[:10]
+                seen_scopes[str(scope)] = {
+                    "count": len(posts),
+                    "recent": [
+                        {
+                            "author_name": str(post.get("author_name") or ""),
+                            "published_at": str(post.get("published_at") or ""),
+                            "url_present": bool(post.get("url")),
+                            "first_seen_at": post.get("first_seen_at"),
+                        }
+                        for post in recent_posts
+                        if isinstance(post, dict)
+                    ],
+                }
+            return {
+                "profile_count": len(profiles),
+                "alias_count": len(state.get("aliases") or {}),
+                "profiles": sorted(profiles, key=lambda item: (item["handle"], item["display_name"])),
+                "seen_scopes": seen_scopes,
+            }
 
     def render_posts(self, payload: dict[str, Any], *, record_seen: bool = True) -> RenderedChannels:
         scope = str(payload.get("scope") or "default").strip() or "default"
@@ -112,6 +157,13 @@ class LocalAirtapRelayStore:
     def avatar_path(self, filename: str) -> Path:
         safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", filename)
         return self.avatar_dir / safe_name
+
+    def media_path(self, filename: str) -> Path:
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", filename)
+        return self.media_dir / safe_name
+
+    def store_media(self, content: bytes, content_type: str, *, prefix: str = "wechat") -> dict[str, str]:
+        return self._store_media(content, content_type, prefix=prefix)
 
     def _upsert_profile(self, state: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
         display_name = str(profile.get("display_name") or "").strip()
@@ -183,6 +235,17 @@ class LocalAirtapRelayStore:
         self.avatar_path(filename).write_bytes(content)
         return {"avatar_path": filename, "avatar_url": f"/api/airtap/avatars/{filename}"}
 
+    def _store_media(self, content: bytes, content_type: str, *, prefix: str = "wechat") -> dict[str, str]:
+        suffix = AVATAR_CONTENT_TYPES.get(content_type, ".jpg")
+        safe_prefix = re.sub(r"[^A-Za-z0-9._-]+", "_", prefix).strip("._-") or "wechat"
+        filename = f"{safe_prefix}-{_hash_bytes(content)[:16]}{suffix}"
+        self.media_dir.mkdir(parents=True, exist_ok=True)
+        self.media_path(filename).write_bytes(content)
+        media_url = f"/api/airtap/media/{filename}"
+        if self.api_base_url:
+            media_url = f"{self.api_base_url}{media_url}"
+        return {"media_path": filename, "media_url": media_url}
+
 
 class SupabaseAirtapRelayStore(LocalAirtapRelayStore):
     def __init__(
@@ -237,6 +300,13 @@ class SupabaseAirtapRelayStore(LocalAirtapRelayStore):
         path = f"airtap/avatars/{profile_id}-{_hash_bytes(content)[:12]}{suffix}"
         self._upload_object(path, content, content_type)
         return {"avatar_path": path, "avatar_url": self._signed_url(path)}
+
+    def _store_media(self, content: bytes, content_type: str, *, prefix: str = "wechat") -> dict[str, str]:
+        suffix = AVATAR_CONTENT_TYPES.get(content_type, ".jpg")
+        safe_prefix = re.sub(r"[^A-Za-z0-9._-]+", "_", prefix).strip("._-") or "wechat"
+        path = f"airtap/media/{safe_prefix}-{_hash_bytes(content)[:16]}{suffix}"
+        self._upload_object(path, content, content_type)
+        return {"media_path": path, "media_url": self._signed_url(path)}
 
     def _upload_object(self, path: str, content: bytes, content_type: str) -> None:
         with httpx.Client(timeout=60) as client:
@@ -370,7 +440,7 @@ def render_xiaohongshu_note(posts: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _wechat_post_row(post: dict[str, Any]) -> str:
-    avatar = html.escape(str(post.get("avatar_data_uri") or ""))
+    avatar = html.escape(str(post.get("avatar_display_url") or post.get("avatar_data_uri") or ""))
     avatar_cell = (
         f'<img src="{avatar}" alt="" style="display:block;width:42px;height:42px;border-radius:50%;object-fit:cover;border:1px solid #e5e7eb;">'
         if avatar
@@ -429,6 +499,25 @@ def _wechat_quote(post: dict[str, Any]) -> str:
 
 def _wechat_media(post: dict[str, Any]) -> str:
     lines = []
+    remaining_image_urls = [str(value) for value in post.get("image_urls") or [] if value]
+
+    for item in post.get("wechat_media_items") or []:
+        if not isinstance(item, dict):
+            continue
+        display_url = str(item.get("display_url") or "")
+        original_url = str(item.get("url") or "")
+        if not display_url:
+            continue
+        safe_url = html.escape(display_url)
+        lines.append(
+            '<div style="margin-top:12px;">'
+            f'<img src="{safe_url}" alt="图片" style="display:block;width:100%;height:auto;max-width:100%;'
+            'border-radius:8px;border:1px solid #e5e7eb;background:#f8fafc;">'
+            "</div>"
+        )
+        if original_url in remaining_image_urls:
+            remaining_image_urls.remove(original_url)
+
     image_data_uris = [str(value) for value in post.get("image_data_uris") or [] if value]
     for data_uri in image_data_uris:
         safe_url = html.escape(data_uri)
@@ -438,7 +527,10 @@ def _wechat_media(post: dict[str, Any]) -> str:
             'border-radius:8px;border:1px solid #e5e7eb;background:#f8fafc;">'
             "</div>"
         )
-    for url in (post.get("image_urls") or [])[len(image_data_uris):]:
+    if image_data_uris:
+        remaining_image_urls = remaining_image_urls[len(image_data_uris):]
+
+    for url in remaining_image_urls:
         safe_url = html.escape(str(url))
         lines.append(
             '<div style="margin-top:6px;padding:8px 10px;background:#f8fafc;border-radius:8px;'

@@ -44,6 +44,7 @@ SUPPORTED_FORMATS = {"png", "jpeg"}
 MIME_TYPES = {"png": "image/png", "jpeg": "image/jpeg"}
 DEFAULT_MAX_UPLOAD_MB = 25
 DEFAULT_TTL_SECONDS = 6 * 60 * 60
+DEFAULT_AIRTAP_SIGNED_URL_TTL_SECONDS = 3 * 24 * 60 * 60
 WEB_MODES = set(VALID_MODES) | {"watermark"}
 WECHAT_AUTH_URL = "https://open.weixin.qq.com/connect/qrconnect"
 WECHAT_TOKEN_URL = "https://api.weixin.qq.com/sns/oauth2/access_token"
@@ -52,12 +53,12 @@ WECHAT_MINIPROGRAM_SESSION_URL = "https://api.weixin.qq.com/sns/jscode2session"
 AIRTAP_MAX_AVATAR_BYTES = 2 * 1024 * 1024
 AIRTAP_AVATAR_CONTENT_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
 AIRTAP_WECHAT_INLINE_SOURCE_MAX_BYTES = 6 * 1024 * 1024
-AIRTAP_WECHAT_INLINE_AVATAR_OUTPUT_MAX_BYTES = 4 * 1024
-AIRTAP_WECHAT_INLINE_AVATAR_MAX_EDGES = (96, 72, 48)
-AIRTAP_WECHAT_INLINE_OUTPUT_MAX_BYTES = 28 * 1024
-AIRTAP_WECHAT_INLINE_TOTAL_MAX_CHARS = 48 * 1024
-AIRTAP_WECHAT_INLINE_MAX_EDGES = (480, 360, 280)
 AIRTAP_WECHAT_INLINE_CONTENT_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
+AIRTAP_WECHAT_HOSTED_AVATAR_OUTPUT_MAX_BYTES = 48 * 1024
+AIRTAP_WECHAT_HOSTED_AVATAR_MAX_EDGES = (180, 128, 96)
+AIRTAP_WECHAT_HOSTED_IMAGE_OUTPUT_MAX_BYTES = 700 * 1024
+AIRTAP_WECHAT_HOSTED_IMAGE_MAX_EDGES = (1280, 960, 720, 480)
+PUSHPLUS_UPLOAD_TOKEN_ENDPOINT = "https://www.pushplus.plus/api/open/userImage/uploadToken"
 logger = logging.getLogger(__name__)
 
 
@@ -96,13 +97,16 @@ class WebSettings:
     wechat_miniprogram_app_id: str
     wechat_miniprogram_app_secret: str
     airtap_relay_secret: str
+    airtap_signed_url_ttl_seconds: int
     airtap_ai_enabled: bool
     openai_api_key: str
     openai_base_url: str
     airtap_ai_model: str
     pushplus_token: str
+    pushplus_access_key: str
     pushplus_topic: str
     pushplus_endpoint: str
+    pushplus_upload_token_endpoint: str
 
     @classmethod
     def from_env(cls) -> "WebSettings":
@@ -154,13 +158,20 @@ class WebSettings:
             wechat_miniprogram_app_id=os.environ.get("WECHAT_MINIPROGRAM_APP_ID", ""),
             wechat_miniprogram_app_secret=os.environ.get("WECHAT_MINIPROGRAM_APP_SECRET", ""),
             airtap_relay_secret=os.environ.get("AIRTAP_RELAY_SECRET", ""),
+            airtap_signed_url_ttl_seconds=int(
+                os.environ.get("AIRTAP_SIGNED_URL_TTL_SECONDS", str(DEFAULT_AIRTAP_SIGNED_URL_TTL_SECONDS))
+            ),
             airtap_ai_enabled=_env_bool(os.environ.get("AIRTAP_AI_ENABLED", "false")),
             openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
             openai_base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com"),
             airtap_ai_model=os.environ.get("AIRTAP_AI_MODEL", os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")),
             pushplus_token=os.environ.get("PUSHPLUS_TOKEN", ""),
+            pushplus_access_key=os.environ.get("PUSHPLUS_ACCESS_KEY", ""),
             pushplus_topic=os.environ.get("PUSHPLUS_TOPIC", ""),
             pushplus_endpoint=os.environ.get("PUSHPLUS_ENDPOINT", "https://www.pushplus.plus/send"),
+            pushplus_upload_token_endpoint=os.environ.get(
+                "PUSHPLUS_UPLOAD_TOKEN_ENDPOINT", PUSHPLUS_UPLOAD_TOKEN_ENDPOINT
+            ),
         )
 
 
@@ -364,11 +375,25 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Profile not found.")
         return {"ok": True, "profile": profile}
 
+    @app.get("/api/airtap/debug/summary")
+    def airtap_debug_summary(request: Request) -> dict[str, Any]:
+        _require_airtap_relay_secret(request, settings)
+        return {"ok": True, "summary": app.state.airtap_relay.summary()}
+
     @app.get("/api/airtap/avatars/{filename}")
     def airtap_avatar(filename: str) -> FileResponse:
         path = app.state.airtap_relay.avatar_path(filename)
         if not path.exists() or not path.is_file():
             raise HTTPException(status_code=404, detail="Avatar not found.")
+        suffix = path.suffix.lower()
+        media_type = "image/jpeg" if suffix in {".jpg", ".jpeg"} else "image/webp" if suffix == ".webp" else "image/png"
+        return FileResponse(path, media_type=media_type)
+
+    @app.get("/api/airtap/media/{filename}")
+    def airtap_media(filename: str) -> FileResponse:
+        path = app.state.airtap_relay.media_path(filename)
+        if not path.exists() or not path.is_file():
+            raise HTTPException(status_code=404, detail="Media not found.")
         suffix = path.suffix.lower()
         media_type = "image/jpeg" if suffix in {".jpg", ".jpeg"} else "image/webp" if suffix == ".webp" else "image/png"
         return FileResponse(path, media_type=media_type)
@@ -813,7 +838,7 @@ def _build_airtap_relay_store(settings: WebSettings) -> Any:
             settings.supabase_url,
             settings.supabase_secret_key,
             settings.airtap_storage_bucket,
-            settings.ttl_seconds,
+            settings.airtap_signed_url_ttl_seconds,
             settings.api_base_url,
         )
     return LocalAirtapRelayStore(settings.data_dir, settings.api_base_url)
@@ -827,7 +852,8 @@ async def _render_airtap_payload(
     record_seen: bool,
 ) -> tuple[Any, dict[str, dict[str, Any]]]:
     rendered = app.state.airtap_relay.render_posts(payload, record_seen=record_seen)
-    await _inline_airtap_wechat_media(rendered.new_posts)
+    if "wechat" in _airtap_requested_channels(payload):
+        await _prepare_airtap_wechat_media(app, rendered.new_posts, settings)
     channels = _render_airtap_channels(payload, rendered.new_posts)
     ai_channels = await _maybe_compose_airtap_channels_with_ai(rendered.new_posts, payload, settings)
     if ai_channels:
@@ -836,16 +862,19 @@ async def _render_airtap_payload(
 
 
 def _render_airtap_channels(payload: dict[str, Any], posts: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    requested_channels = payload.get("channels") or ["wechat", "xiaohongshu"]
-    channels = [str(channel) for channel in requested_channels if str(channel) in {"wechat", "xiaohongshu"}]
-    if not channels:
-        channels = ["wechat", "xiaohongshu"]
+    channels = _airtap_requested_channels(payload)
     rendered = {}
     if "wechat" in channels:
         rendered["wechat"] = render_wechat_pushplus(posts)
     if "xiaohongshu" in channels:
         rendered["xiaohongshu"] = render_xiaohongshu_note(posts)
     return rendered
+
+
+def _airtap_requested_channels(payload: dict[str, Any]) -> list[str]:
+    requested_channels = payload.get("channels") or ["wechat", "xiaohongshu"]
+    channels = [str(channel) for channel in requested_channels if str(channel) in {"wechat", "xiaohongshu"}]
+    return channels or ["wechat", "xiaohongshu"]
 
 
 def _env_bool(value: str) -> bool:
@@ -931,90 +960,178 @@ async def _download_airtap_profile_avatars(profiles: list[Any]) -> list[dict[str
     return hydrated
 
 
-async def _inline_airtap_wechat_media(posts: list[dict[str, Any]]) -> None:
-    avatar_urls: list[str] = []
-    image_urls: list[str] = []
+async def _prepare_airtap_wechat_media(app: FastAPI, posts: list[dict[str, Any]], settings: WebSettings) -> None:
+    urls: list[str] = []
     for post in posts:
         avatar_url = str(post.get("avatar_url") or "").strip()
         if avatar_url:
-            avatar_urls.append(avatar_url)
-        for url in post.get("image_urls") or []:
-            if url:
-                image_urls.append(str(url))
-    if not avatar_urls and not image_urls:
+            urls.append(avatar_url)
+        urls.extend(str(url) for url in post.get("image_urls") or [] if url)
+    if not urls:
         return
 
-    avatar_cache: dict[str, str] = {}
-    image_cache: dict[str, str] = {}
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        for url in dict.fromkeys(avatar_urls):
-            avatar_cache[url] = await _download_inline_image_data_uri(
-                client,
-                url,
-                max_edges=AIRTAP_WECHAT_INLINE_AVATAR_MAX_EDGES,
-                output_max_bytes=AIRTAP_WECHAT_INLINE_AVATAR_OUTPUT_MAX_BYTES,
-            )
-        for url in dict.fromkeys(image_urls):
-            image_cache[url] = await _download_inline_image_data_uri(
-                client,
-                url,
-                max_edges=AIRTAP_WECHAT_INLINE_MAX_EDGES,
-                output_max_bytes=AIRTAP_WECHAT_INLINE_OUTPUT_MAX_BYTES,
-            )
+        upload_config = await _get_pushplus_upload_config(client, settings)
+        cache: dict[str, bytes] = {}
+        for url in dict.fromkeys(urls):
+            cache[url] = await _download_wechat_image_bytes(client, url)
 
-    remaining_chars = AIRTAP_WECHAT_INLINE_TOTAL_MAX_CHARS
-    for post in posts:
-        avatar_url = str(post.get("avatar_url") or "").strip()
-        avatar_data_uri = avatar_cache.get(avatar_url, "")
-        if avatar_data_uri and len(avatar_data_uri) <= remaining_chars:
-            post["avatar_data_uri"] = avatar_data_uri
-            remaining_chars -= len(avatar_data_uri)
-        image_data_uris = []
-        for url in post.get("image_urls") or []:
-            data_uri = image_cache.get(str(url))
-            if data_uri and len(data_uri) <= remaining_chars:
-                image_data_uris.append(data_uri)
-                remaining_chars -= len(data_uri)
-        if image_data_uris:
-            post["image_data_uris"] = image_data_uris
+        for post in posts:
+            avatar_url = str(post.get("avatar_url") or "").strip()
+            avatar_source = cache.get(avatar_url, b"")
+            if avatar_source:
+                try:
+                    avatar_bytes = _image_bytes_to_jpeg_bytes(
+                        avatar_source,
+                        max_edges=AIRTAP_WECHAT_HOSTED_AVATAR_MAX_EDGES,
+                        output_max_bytes=AIRTAP_WECHAT_HOSTED_AVATAR_OUTPUT_MAX_BYTES,
+                    )
+                except (OSError, UnidentifiedImageError, ValueError) as exc:
+                    logger.warning("Airtap WeChat avatar encode failed: url=%s error=%s", avatar_url, exc)
+                    avatar_bytes = b""
+            else:
+                avatar_bytes = b""
+            if avatar_bytes:
+                avatar_display_url = await _publish_wechat_image(
+                    app,
+                    client,
+                    settings,
+                    upload_config,
+                    avatar_bytes,
+                    prefix="wechat-avatar",
+                )
+                if avatar_display_url:
+                    post["avatar_display_url"] = avatar_display_url
+                else:
+                    post["avatar_data_uri"] = _jpeg_bytes_to_data_uri(avatar_bytes)
+
+            media_items = []
+            for url in post.get("image_urls") or []:
+                source = cache.get(str(url), b"")
+                if not source:
+                    continue
+                try:
+                    image_bytes = _image_bytes_to_jpeg_bytes(
+                        source,
+                        max_edges=AIRTAP_WECHAT_HOSTED_IMAGE_MAX_EDGES,
+                        output_max_bytes=AIRTAP_WECHAT_HOSTED_IMAGE_OUTPUT_MAX_BYTES,
+                    )
+                except (OSError, UnidentifiedImageError, ValueError) as exc:
+                    logger.warning("Airtap WeChat media encode failed: url=%s error=%s", url, exc)
+                    continue
+                display_url = await _publish_wechat_image(
+                    app,
+                    client,
+                    settings,
+                    upload_config,
+                    image_bytes,
+                    prefix="wechat-image",
+                )
+                if display_url:
+                    media_items.append({"url": str(url), "display_url": display_url})
+            if media_items:
+                post["wechat_media_items"] = media_items
 
 
-async def _download_inline_image_data_uri(
-    client: httpx.AsyncClient,
-    url: str,
-    *,
-    max_edges: tuple[int, ...],
-    output_max_bytes: int,
-) -> str:
+async def _download_wechat_image_bytes(client: httpx.AsyncClient, url: str) -> bytes:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
-        return ""
+        return b""
     try:
         response = await client.get(url)
         response.raise_for_status()
     except Exception as exc:
-        logger.warning("Airtap WeChat image inline download failed: url=%s error=%s", url, exc)
-        return ""
+        logger.warning("Airtap WeChat image download failed: url=%s error=%s", url, exc)
+        return b""
     content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
     if content_type not in AIRTAP_WECHAT_INLINE_CONTENT_TYPES:
-        return ""
-    content = response.content
-    if len(content) > AIRTAP_WECHAT_INLINE_SOURCE_MAX_BYTES:
-        logger.warning("Airtap WeChat image too large to inline: url=%s bytes=%s", url, len(content))
-        return ""
+        return b""
+    if len(response.content) > AIRTAP_WECHAT_INLINE_SOURCE_MAX_BYTES:
+        logger.warning("Airtap WeChat image too large to process: url=%s bytes=%s", url, len(response.content))
+        return b""
+    return response.content
+
+
+async def _get_pushplus_upload_config(client: httpx.AsyncClient, settings: WebSettings) -> dict[str, str]:
+    if not settings.pushplus_access_key:
+        return {}
     try:
-        return _image_bytes_to_jpeg_data_uri(content, max_edges=max_edges, output_max_bytes=output_max_bytes)
-    except (OSError, UnidentifiedImageError, ValueError) as exc:
-        logger.warning("Airtap WeChat image encode failed: url=%s error=%s", url, exc)
+        response = await client.get(
+            settings.pushplus_upload_token_endpoint,
+            headers={"access-key": settings.pushplus_access_key},
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        logger.warning("PushPlus image upload token request failed: %s", exc)
+        return {}
+    if payload.get("code") not in {200, "200"}:
+        logger.warning("PushPlus image upload token rejected: code=%s msg=%s", payload.get("code"), payload.get("msg"))
+        return {}
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    upload_url = str(data.get("uploadUrl") or data.get("upload_url") or "")
+    token = str(data.get("token") or data.get("uploadToken") or data.get("upload_token") or "")
+    if not upload_url or not token:
+        return {}
+    return {"upload_url": upload_url, "token": token}
+
+
+async def _publish_wechat_image(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    settings: WebSettings,
+    upload_config: dict[str, str],
+    content: bytes,
+    *,
+    prefix: str,
+) -> str:
+    pushplus_url = await _upload_pushplus_image(client, upload_config, content, prefix=prefix)
+    if pushplus_url:
+        return pushplus_url
+    try:
+        stored = app.state.airtap_relay.store_media(content, "image/jpeg", prefix=prefix)
+    except Exception as exc:
+        logger.warning("Airtap WeChat media storage failed: %s", exc)
         return ""
+    return str(stored.get("media_url") or "")
 
 
-def _image_bytes_to_jpeg_data_uri(
+async def _upload_pushplus_image(
+    client: httpx.AsyncClient,
+    upload_config: dict[str, str],
+    content: bytes,
+    *,
+    prefix: str,
+) -> str:
+    upload_url = upload_config.get("upload_url", "")
+    token = upload_config.get("token", "")
+    if not upload_url or not token:
+        return ""
+    filename = f"{prefix}-{hashlib.sha256(content).hexdigest()[:16]}.jpg"
+    try:
+        response = await client.post(
+            upload_url,
+            data={"token": token},
+            files={"file": (filename, content, "image/jpeg")},
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        logger.warning("PushPlus image upload failed: %s", exc)
+        return ""
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    image_url = str(payload.get("url") or data.get("url") or data.get("thumbnail") or "")
+    if image_url.startswith("//"):
+        return f"https:{image_url}"
+    return image_url
+
+
+def _image_bytes_to_jpeg_bytes(
     content: bytes,
     *,
     max_edges: tuple[int, ...],
     output_max_bytes: int,
-) -> str:
+) -> bytes:
     source = Image.open(io.BytesIO(content))
     output = io.BytesIO()
     for edge in max_edges:
@@ -1031,8 +1148,12 @@ def _image_bytes_to_jpeg_data_uri(
             output.truncate(0)
             image.save(output, format="JPEG", quality=quality, optimize=True)
             if output.tell() <= output_max_bytes:
-                return "data:image/jpeg;base64," + base64.b64encode(output.getvalue()).decode("ascii")
+                return output.getvalue()
     raise ValueError("encoded image is too large")
+
+
+def _jpeg_bytes_to_data_uri(content: bytes) -> str:
+    return "data:image/jpeg;base64," + base64.b64encode(content).decode("ascii")
 
 
 async def _maybe_compose_airtap_channels_with_ai(
