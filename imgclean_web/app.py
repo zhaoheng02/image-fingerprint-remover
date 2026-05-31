@@ -59,6 +59,7 @@ AIRTAP_WECHAT_HOSTED_AVATAR_MAX_EDGES = (180, 128, 96)
 AIRTAP_WECHAT_HOSTED_IMAGE_OUTPUT_MAX_BYTES = 700 * 1024
 AIRTAP_WECHAT_HOSTED_IMAGE_MAX_EDGES = (1280, 960, 720, 480)
 PUSHPLUS_UPLOAD_TOKEN_ENDPOINT = "https://www.pushplus.plus/api/open/userImage/uploadToken"
+AIRTAP_API_BASE_URL = "https://airtap.ai/cortex/api"
 logger = logging.getLogger(__name__)
 
 
@@ -102,6 +103,11 @@ class WebSettings:
     openai_api_key: str
     openai_base_url: str
     airtap_ai_model: str
+    airtap_api_base_url: str
+    airtap_personal_access_token: str
+    airtap_xhs_model_id: str
+    airtap_receiver_id: str
+    cron_secret: str
     pushplus_token: str
     pushplus_access_key: str
     pushplus_topic: str
@@ -165,6 +171,11 @@ class WebSettings:
             openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
             openai_base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com"),
             airtap_ai_model=os.environ.get("AIRTAP_AI_MODEL", os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")),
+            airtap_api_base_url=os.environ.get("AIRTAP_BASE_URL", AIRTAP_API_BASE_URL),
+            airtap_personal_access_token=os.environ.get("AIRTAP_PERSONAL_ACCESS_TOKEN", ""),
+            airtap_xhs_model_id=os.environ.get("AIRTAP_XHS_MODEL_ID", "airtap-1.0"),
+            airtap_receiver_id=os.environ.get("AIRTAP_RECEIVER_ID", "cloud"),
+            cron_secret=os.environ.get("CRON_SECRET", ""),
             pushplus_token=os.environ.get("PUSHPLUS_TOKEN", ""),
             pushplus_access_key=os.environ.get("PUSHPLUS_ACCESS_KEY", ""),
             pushplus_topic=os.environ.get("PUSHPLUS_TOPIC", ""),
@@ -424,6 +435,68 @@ def create_app() -> FastAPI:
             "posts": rendered.new_posts,
             "channels": channels,
             "pushes": pushes,
+        }
+
+    @app.get("/api/airtap/xhs/dispatch")
+    async def airtap_xhs_dispatch(request: Request, dry_run: bool = False, hours: int = 8) -> dict[str, Any]:
+        _require_airtap_or_cron_secret(request, settings)
+        safe_hours = min(max(hours, 1), 24)
+        dispatch_key = _xhs_dispatch_key(safe_hours)
+        existing_dispatch = None if dry_run else app.state.airtap_relay.dispatch_status("xiaohongshu", dispatch_key)
+        posts = app.state.airtap_relay.recent_posts(
+            "x-hourly-wechat",
+            since_seconds=safe_hours * 60 * 60,
+        )
+        channels = _render_airtap_channels({"channels": ["xiaohongshu"]}, posts)
+        ai_channels = await _maybe_compose_airtap_channels_with_ai(posts, {"channels": ["xiaohongshu"]}, settings)
+        if ai_channels:
+            channels = {**channels, **ai_channels}
+        if existing_dispatch:
+            return {
+                "ok": True,
+                "dispatch_key": dispatch_key,
+                "post_count": len(posts),
+                "channels": channels,
+                "airtap": {"ok": False, "reason": "already_dispatched", "dispatch": existing_dispatch},
+            }
+        if dry_run:
+            return {
+                "ok": True,
+                "dispatch_key": dispatch_key,
+                "post_count": len(posts),
+                "channels": channels,
+                "airtap": {"ok": False, "reason": "dry_run"},
+            }
+        if not posts:
+            app.state.airtap_relay.record_dispatch(
+                "xiaohongshu",
+                dispatch_key,
+                {"post_count": 0, "reason": "no_posts"},
+            )
+            return {
+                "ok": True,
+                "dispatch_key": dispatch_key,
+                "post_count": 0,
+                "channels": channels,
+                "airtap": {"ok": False, "reason": "no_posts"},
+            }
+        airtap_task = await _create_airtap_xhs_task(settings, channels["xiaohongshu"], post_count=len(posts))
+        if airtap_task.get("ok"):
+            app.state.airtap_relay.record_dispatch(
+                "xiaohongshu",
+                dispatch_key,
+                {
+                    "post_count": len(posts),
+                    "taskId": airtap_task.get("taskId", ""),
+                    "taskState": airtap_task.get("taskState", ""),
+                },
+            )
+        return {
+            "ok": True,
+            "dispatch_key": dispatch_key,
+            "post_count": len(posts),
+            "channels": channels,
+            "airtap": airtap_task,
         }
 
     @app.get("/api/auth/wechat/login")
@@ -892,6 +965,27 @@ def _require_airtap_relay_secret(request: Request, settings: WebSettings) -> Non
         raise HTTPException(status_code=401, detail="Invalid Airtap relay secret.")
 
 
+def _require_airtap_or_cron_secret(request: Request, settings: WebSettings) -> None:
+    supplied = request.headers.get("x-airtap-secret", "")
+    auth_header = request.headers.get("authorization", "")
+    bearer = ""
+    if auth_header.lower().startswith("bearer "):
+        bearer = auth_header.split(" ", 1)[1].strip()
+        supplied = bearer
+    if settings.airtap_relay_secret and hmac.compare_digest(supplied, settings.airtap_relay_secret):
+        return
+    if settings.cron_secret and hmac.compare_digest(bearer, settings.cron_secret):
+        return
+    raise HTTPException(status_code=401, detail="Invalid Airtap or cron secret.")
+
+
+def _xhs_dispatch_key(hours: int) -> str:
+    window_seconds = hours * 60 * 60
+    asia_shanghai_offset = 8 * 60 * 60
+    window = int((time.time() + asia_shanghai_offset) // window_seconds)
+    return f"xhs-{hours}h-{window}"
+
+
 def _safe_return_to(return_to: str, app_base_url: str) -> str:
     fallback = f"{app_base_url.rstrip('/')}/dashboard"
     if not return_to:
@@ -1291,6 +1385,58 @@ async def _publish_airtap_channels(
         return pushes
     pushes["wechat"] = await _send_pushplus(channels["wechat"], settings)
     return pushes
+
+
+async def _create_airtap_xhs_task(settings: WebSettings, channel: dict[str, Any], *, post_count: int) -> dict[str, Any]:
+    if not settings.airtap_personal_access_token:
+        return {"ok": False, "reason": "airtap_token_not_configured"}
+    title = str(channel.get("title") or "")
+    body = str(channel.get("body") or "")
+    hashtags = [str(tag) for tag in channel.get("hashtags") or [] if str(tag).strip()]
+    message = _airtap_xhs_publish_message(title, body, hashtags, post_count=post_count)
+    payload: dict[str, Any] = {
+        "receiverId": settings.airtap_receiver_id,
+        "modelId": settings.airtap_xhs_model_id,
+        "userMessage": {"type": "user", "parts": [{"type": "text", "text": message}]},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.post(
+                f"{settings.airtap_api_base_url.rstrip('/')}/task/v1/taskCreate",
+                headers={
+                    "Authorization": f"Bearer {settings.airtap_personal_access_token}",
+                    "Content-Type": "application/json",
+                    "x-airtap-pilot-client-type": "pilot-agent",
+                    "x-airtap-pilot-client-name": "imgclean-server",
+                },
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
+    except Exception as exc:
+        logger.warning("Airtap Xiaohongshu task creation failed: %s", exc)
+        return {"ok": False, "reason": "airtap_task_create_failed", "message": str(exc)}
+    return {
+        "ok": True,
+        "taskId": data.get("taskId", ""),
+        "taskState": data.get("taskState", ""),
+    }
+
+
+def _airtap_xhs_publish_message(title: str, body: str, hashtags: list[str], *, post_count: int) -> str:
+    hashtag_text = " ".join(f"#{tag.lstrip('#')}" for tag in hashtags)
+    return (
+        "Publish the backend-prepared Xiaohongshu note.\n\n"
+        "Do not open X. Do not scrape X. Do not rewrite the copy. "
+        "The server already collected the hourly posts, deduped them, and generated this 8-hour summary.\n\n"
+        "Open Xiaohongshu and create a note with exactly this content:\n\n"
+        f"Title:\n{title}\n\n"
+        f"Body:\n{body}\n\n"
+        f"Hashtags:\n{hashtag_text}\n\n"
+        f"Source batch: {post_count} stored hourly posts from the backend.\n"
+        "If Xiaohongshu is logged out, asks for verification, or cannot publish, stop and report the blocker. "
+        "Do not wait for user login."
+    )
 
 
 async def _send_pushplus(channel: dict[str, Any], settings: WebSettings) -> dict[str, Any]:

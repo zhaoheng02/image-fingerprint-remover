@@ -168,11 +168,11 @@ The response contains `channels.wechat.title`, `channels.wechat.content`, `pushe
 
 Phone-side Airtap publishing contract:
 
-1. Airtap scrapes X only for raw fields: author display name, handle, easily available avatar URL, published time, text, quote, original URL, image URLs, and video URLs.
+1. Airtap scrapes X only for the latest hour of raw fields: author display name, handle, easily available avatar URL, published time, text, quote, original URL, image URLs, and video URLs.
 2. Airtap calls `/api/airtap/profiles/upsert` for display-name/handle mappings. Avatar URLs are optional; do not ask Airtap to spend extra steps opening image tabs to obtain direct avatar URLs.
-3. Airtap calls `/api/airtap/posts/publish` with `channels=["wechat","xiaohongshu"]`. WeChat delivery is handled by the backend through PushPlus; Airtap must not call PushPlus directly.
-4. If `new_count` is `0`, Airtap stops and posts nothing.
-5. If `new_count` is greater than `0`, Airtap opens Xiaohongshu on the cloud phone, creates a note from `channels.xiaohongshu.title`, `body`, and `hashtags`, attaches the media URLs it collected when the app supports upload from the local files, and publishes through the app. This keeps Xiaohongshu traffic as normal phone interaction while keeping content generation server-side.
+3. Airtap calls `/api/airtap/posts/publish` with `scope="x-hourly-wechat"` and `channels=["wechat"]`. WeChat delivery is handled by the backend through PushPlus; Airtap must not call PushPlus directly.
+4. The backend stores the full hourly post payload after dedupe. Airtap must not scrape an 8-hour X history.
+5. A cloud scheduler calls `/api/airtap/xhs/dispatch` every 8 hours. That endpoint reads the stored hourly posts, generates the Xiaohongshu note, and creates a separate Airtap task to publish it through the Xiaohongshu app.
 6. Never put PushPlus tokens or OpenAI keys into Airtap prompts. The only Airtap-side secret should be `AIRTAP_RELAY_SECRET`, sent as the `x-airtap-secret` header or Bearer token when calling the backend.
 
 Generate the exact Airtap prompt from the local machine:
@@ -183,7 +183,9 @@ scripts/airtap_x_hourly_prompt.py --xhs-smoke
 scripts/airtap_x_hourly_prompt.py
 ```
 
-The script reads `AIRTAP_RELAY_SECRET` from the environment, or from `~/.codex/secrets/imgclean-airtap-relay-secret`. Use `--xhs-smoke` to verify the cloud phone can call `/api/airtap/posts/render` and fill a Xiaohongshu draft without sending WeChat or writing dedupe state. Use `--dry-run` to run the real X hourly flow and stop before tapping the final Xiaohongshu publish button. Omit `--dry-run` for the production Airtap routine. WeChat content is self-contained in the PushPlus HTML; do not ask Airtap to create extra WeChat links or call PushPlus.
+The script reads `AIRTAP_RELAY_SECRET` from the environment, or from `~/.codex/secrets/imgclean-airtap-relay-secret`. Use `--xhs-smoke` to verify the cloud phone can call `/api/airtap/posts/render` and fill a Xiaohongshu draft without sending WeChat or writing dedupe state. Use `--dry-run` to validate the hourly X ingestion with render-only backend calls. Omit `--dry-run` for the production Airtap routine. WeChat content is self-contained in the PushPlus HTML; do not ask Airtap to create extra WeChat links or call PushPlus.
+
+For the 8-hour Xiaohongshu trigger, `.github/workflows/xhs-dispatch.yml` calls the backend at UTC 00/08/16. Configure the repository secret `X_AIRTAP_RELAY_SECRET` with the same value as `AIRTAP_RELAY_SECRET`. The backend also needs `AIRTAP_PERSONAL_ACCESS_TOKEN` so it can create the Airtap publish task without depending on the local computer.
 
 ## Watermark Removal
 

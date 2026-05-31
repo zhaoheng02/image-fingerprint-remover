@@ -69,11 +69,12 @@ def test_xhs_8h_prompt_uses_separate_scope_and_human_summary_direction():
     assert "publish the note through the Xiaohongshu app" in prompt
 
 
-def test_cloud_routine_prompt_keeps_server_side_schedule_clear():
+def test_cloud_routine_prompt_only_collects_the_latest_hour():
     prompt = _run_prompt("--channel-plan", "cloud-routine")
 
     assert "single Airtap cloud routine" in prompt
     assert "computer running Codex is not part of production execution" in prompt
     assert 'scope "x-hourly-wechat", channels ["wechat"]' in prompt
-    assert 'scope "x-8h-xhs", channels ["xiaohongshu"]' in prompt
-    assert "current Asia/Shanghai hour is 00, 08, or 16" in prompt
+    assert 'scope "x-8h-xhs", channels ["xiaohongshu"]' not in prompt
+    assert "Do not collect an 8-hour history in Airtap" in prompt
+    assert "Do not open Xiaohongshu" in prompt

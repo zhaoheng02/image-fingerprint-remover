@@ -167,30 +167,24 @@ def _print_cloud_routine_prompt(api_base: str, secret: str, *, dry_run: bool) ->
     dry_note = (
         "This is a dry-run validation: use render endpoints only and do not tap any Xiaohongshu final publish button."
         if dry_run
-        else "This is production: WeChat is pushed by the backend; Xiaohongshu is published only on 8-hour boundary runs."
+        else "This is production: WeChat is pushed by the backend; Xiaohongshu is dispatched later by the server from stored hourly posts."
     )
     print(
-        f"""Cloud routine: X monitor with WeChat hourly and Xiaohongshu every 8 hours.
+        f"""Cloud routine: X monitor hourly ingestion for WeChat and server-side Xiaohongshu batching.
 
 Run this as the single Airtap cloud routine. The computer running Codex is not part of production execution.
 {dry_note}
 
 Every run:
 1. Determine current Asia/Shanghai time.
-2. Always execute the WeChat hourly plan:
-   - collect posts from the past hour for xiaomustock, hanking66, aleabitoreddit, IamRamenPanda, ArtofSpecuycky.
-   - call POST {api_base}/api/airtap/profiles/upsert for observed profiles.
-   - call POST {api_base}{endpoint} with scope "x-hourly-wechat", channels ["wechat"], and the collected posts.
-   - WeChat content must come from the backend. Do not push to PushPlus yourself and do not show raw X links as message body.
-3. If the current Asia/Shanghai hour is 00, 08, or 16, also execute the Xiaohongshu 8-hour plan:
-   - collect all qualifying posts from the past 8 hours for the same accounts.
-   - call POST {api_base}/api/airtap/profiles/upsert for observed profiles.
-   - call POST {api_base}{endpoint} with scope "x-8h-xhs", channels ["xiaohongshu"], and the collected posts.
-   - if response.new_count is greater than 0, open Xiaohongshu and create a note from response.channels.xiaohongshu.title/body/hashtags exactly.
-   - Xiaohongshu copy must be backend-generated: summarized, de-AI-flavored, and written in a human tone that borrows the cadence of the original posts without copying them raw.
-4. If the current hour is not 00, 08, or 16, do not open Xiaohongshu and do not post there.
-5. Backend calls are a hard gate. Use Termux/curl or another reliable HTTP client on the cloud phone. Do not use browser page text as a substitute for API JSON.
-6. Never expose PushPlus token, OpenAI key, or the relay secret in reports. The relay secret must only be sent as x-airtap-secret: {secret}.
+2. Collect posts only from the past hour for xiaomustock, hanking66, aleabitoreddit, IamRamenPanda, ArtofSpecuycky.
+3. Do not collect an 8-hour history in Airtap. The server stores hourly posts and creates the 8-hour Xiaohongshu batch later.
+4. Call POST {api_base}/api/airtap/profiles/upsert for observed profiles.
+5. Call POST {api_base}{endpoint} with scope "x-hourly-wechat", channels ["wechat"], and the collected posts.
+6. WeChat content must come from the backend. Do not push to PushPlus yourself and do not show raw X links as message body.
+7. Do not open Xiaohongshu. A separate server/GitHub scheduled job will later call the backend dispatch endpoint, and the backend will create a separate Airtap task for Xiaohongshu publishing from stored posts.
+8. Backend calls are a hard gate. Use Termux/curl or another reliable HTTP client on the cloud phone. Do not use browser page text as a substitute for API JSON.
+9. Never expose PushPlus token, OpenAI key, or the relay secret in reports. The relay secret must only be sent as x-airtap-secret: {secret}.
 
 Use these X search URLs directly:
 {_search_urls()}

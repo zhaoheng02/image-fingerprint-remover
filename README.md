@@ -109,8 +109,10 @@ Recommended production setup: put HTTPS, request-size limits, rate limiting, and
 - `AIRTAP_RELAY_SECRET` — shared secret for Airtap relay endpoints
 - `AIRTAP_STORAGE_BUCKET` — Supabase Storage bucket for Airtap avatar/state persistence; keep it separate from image-only upload buckets
 - `AIRTAP_SIGNED_URL_TTL_SECONDS` — signed Airtap media URL lifetime, defaults to `259200` (3 days)
+- `AIRTAP_PERSONAL_ACCESS_TOKEN`, optional `AIRTAP_BASE_URL`, `AIRTAP_XHS_MODEL_ID`, and `AIRTAP_RECEIVER_ID` — let the backend create the separate Xiaohongshu publish Airtap task from stored 8-hour batches
 - `AIRTAP_AI_ENABLED=true`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `AIRTAP_AI_MODEL` — let the relay compose Xiaohongshu note copy with an AI model; WeChat uses deterministic mobile-safe HTML
 - `PUSHPLUS_TOKEN`, optional `PUSHPLUS_ACCESS_KEY`, `PUSHPLUS_TOPIC`, `PUSHPLUS_ENDPOINT`, and `PUSHPLUS_UPLOAD_TOKEN_ENDPOINT` — let `/api/airtap/posts/publish` push WeChat content through PushPlus; when `PUSHPLUS_ACCESS_KEY` is configured, WeChat images are uploaded to PushPlus image storage before rendering
+- GitHub Actions secret `X_AIRTAP_RELAY_SECRET` — used by `.github/workflows/xhs-dispatch.yml` to trigger `/api/airtap/xhs/dispatch` at 00/08/16 UTC, so the 8-hour Xiaohongshu batch does not depend on a local computer staying awake
 
 ## What it detects
 

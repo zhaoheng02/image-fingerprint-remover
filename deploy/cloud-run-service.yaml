@@ -60,6 +60,12 @@ spec:
               value: gpt-5.5
             - name: AIRTAP_SIGNED_URL_TTL_SECONDS
               value: "259200"
+            - name: AIRTAP_BASE_URL
+              value: https://airtap.ai/cortex/api
+            - name: AIRTAP_XHS_MODEL_ID
+              value: airtap-1.0
+            - name: AIRTAP_RECEIVER_ID
+              value: cloud
             - name: PUSHPLUS_ENDPOINT
               value: https://www.pushplus.plus/send
             - name: PUSHPLUS_UPLOAD_TOKEN_ENDPOINT
@@ -85,6 +91,11 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: imgclean-airtap-relay-secret
+                  key: latest
+            - name: AIRTAP_PERSONAL_ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: imgclean-airtap-personal-access-token
                   key: latest
             - name: OPENAI_API_KEY
               valueFrom:

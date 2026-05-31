@@ -16,13 +16,20 @@ from typing import Any
 import httpx
 
 
-DEFAULT_STATE = {"profiles": {}, "aliases": {}, "seen_posts": {}}
+DEFAULT_STATE = {"profiles": {}, "aliases": {}, "seen_posts": {}, "dispatches": {}}
 logger = logging.getLogger(__name__)
 AVATAR_CONTENT_TYPES = {
     "image/jpeg": ".jpg",
     "image/jpg": ".jpg",
     "image/png": ".png",
     "image/webp": ".webp",
+}
+KNOWN_X_PROFILES = {
+    "xiaomustock": "川沐｜Trumoo 🐮",
+    "hanking66": "美股仙人",
+    "aleabitoreddit": "Serenity",
+    "iamramenpanda": "RamenPanda",
+    "artofspecuycky": "Art of Speculation",
 }
 
 
@@ -104,6 +111,49 @@ class LocalAirtapRelayStore:
                 "seen_scopes": seen_scopes,
             }
 
+    def recent_posts(self, scope: str, *, since_seconds: int, limit: int = 80) -> list[dict[str, Any]]:
+        cutoff = int(time.time()) - since_seconds
+        with self._lock:
+            state = self._read()
+            posts = state.get("seen_posts", {}).get(scope, {})
+            if not isinstance(posts, dict):
+                return []
+            recent_items = []
+            for item in posts.values():
+                if not isinstance(item, dict):
+                    continue
+                first_seen_at = int(item.get("first_seen_at") or 0)
+                if first_seen_at < cutoff:
+                    continue
+                post = item.get("post")
+                if not isinstance(post, dict):
+                    post = {
+                        "author_name": item.get("author_name", ""),
+                        "published_at": item.get("published_at", ""),
+                        "url": item.get("url", ""),
+                    }
+                if not _has_dispatch_content(post):
+                    continue
+                recent_items.append((first_seen_at, post))
+            recent_items.sort(key=lambda item: item[0])
+            return [dict(post) for _, post in recent_items[-limit:]]
+
+    def dispatch_status(self, channel: str, key: str) -> dict[str, Any] | None:
+        with self._lock:
+            state = self._read()
+            dispatches = state.get("dispatches", {}).get(channel, {})
+            dispatch = dispatches.get(key) if isinstance(dispatches, dict) else None
+            return dict(dispatch) if isinstance(dispatch, dict) else None
+
+    def record_dispatch(self, channel: str, key: str, details: dict[str, Any]) -> dict[str, Any]:
+        with self._lock:
+            state = self._read()
+            dispatches = state.setdefault("dispatches", {}).setdefault(channel, {})
+            dispatch = {"dispatched_at": int(time.time()), **details}
+            dispatches[key] = dispatch
+            self._write(state)
+            return dict(dispatch)
+
     def render_posts(self, payload: dict[str, Any], *, record_seen: bool = True) -> RenderedChannels:
         scope = str(payload.get("scope") or "default").strip() or "default"
         requested_channels = payload.get("channels") or ["wechat", "xiaohongshu"]
@@ -128,8 +178,10 @@ class LocalAirtapRelayStore:
                     seen_for_scope[key] = {
                         "first_seen_at": int(time.time()),
                         "author_name": post.get("author_name", ""),
+                        "author_handle": post.get("author_handle", ""),
                         "published_at": post.get("published_at", ""),
                         "url": post.get("url", ""),
+                        "post": _stored_post(post),
                     }
                 new_posts.append(post)
             if record_seen:
@@ -208,12 +260,26 @@ class LocalAirtapRelayStore:
 
     def _enrich_post(self, state: dict[str, Any], post: dict[str, Any]) -> dict[str, Any]:
         enriched = dict(post)
-        profile = self._lookup_profile(state, str(post.get("author_handle") or post.get("author_name") or ""))
+        inferred_handle = _infer_post_handle(post)
+        if inferred_handle and _is_missing_author(enriched.get("author_handle")):
+            enriched["author_handle"] = inferred_handle
+        profile = self._lookup_profile(
+            state,
+            str(enriched.get("author_handle") or enriched.get("author_name") or inferred_handle or ""),
+        )
         if profile:
             public_profile = self.public_profile(profile)
-            enriched["author_name"] = enriched.get("author_name") or public_profile["display_name"]
-            enriched["author_handle"] = enriched.get("author_handle") or public_profile["handle"]
+            if _is_missing_author(enriched.get("author_name")):
+                enriched["author_name"] = public_profile["display_name"]
+            if _is_missing_author(enriched.get("author_handle")):
+                enriched["author_handle"] = public_profile["handle"]
             enriched["avatar_url"] = public_profile["avatar_url"]
+        elif inferred_handle:
+            normalized_handle = _normalize_alias(inferred_handle)
+            if _is_missing_author(enriched.get("author_name")) and normalized_handle in KNOWN_X_PROFILES:
+                enriched["author_name"] = KNOWN_X_PROFILES[normalized_handle]
+            if _is_missing_author(enriched.get("author_handle")):
+                enriched["author_handle"] = inferred_handle
         return enriched
 
     def _read(self) -> dict[str, Any]:
@@ -389,7 +455,7 @@ def render_wechat_pushplus(posts: list[dict[str, Any]]) -> dict[str, Any]:
             'background:#f8fafc;padding:10px;max-width:100%;box-sizing:border-box;">'
             '<div style="padding:14px 16px;margin-bottom:10px;border-radius:10px;'
             'background:#111827;color:#fff;">'
-            '<div style="font-size:13px;color:#cbd5e1;">1 小时信息整理 · Codex 编辑摘要</div>'
+            '<div style="font-size:13px;color:#cbd5e1;">1 小时信息整理</div>'
             f'<div style="font-size:20px;font-weight:800;line-height:1.35;margin-top:4px;">{html.escape(title)}</div>'
             '<div style="font-size:12px;color:#94a3b8;margin-top:4px;">正文、引用和图片尽量直接展示；回溯信息只留在后台记录里。</div>'
             "</div>"
@@ -666,6 +732,31 @@ def _plain_media(label: str, urls: list[Any]) -> str:
     return "\n".join(f"{label}：{url}" for url in urls)
 
 
+def _stored_post(post: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "id",
+        "author_name",
+        "author_handle",
+        "published_at",
+        "text",
+        "url",
+        "quote",
+        "image_urls",
+        "video_urls",
+        "avatar_url",
+    }
+    return {key: value for key, value in post.items() if key in allowed}
+
+
+def _has_dispatch_content(post: dict[str, Any]) -> bool:
+    if str(post.get("text") or "").strip():
+        return True
+    quote = post.get("quote")
+    if isinstance(quote, dict) and str(quote.get("text") or "").strip():
+        return True
+    return bool(post.get("image_urls") or post.get("video_urls"))
+
+
 def _decode_avatar(profile: dict[str, Any]) -> bytes:
     avatar_base64 = str(profile.get("avatar_base64") or "").strip()
     if not avatar_base64:
@@ -695,6 +786,33 @@ def _normalize_alias(value: str) -> str:
     normalized = str(value or "").strip().lower().lstrip("@")
     normalized = re.sub(r"\s+", " ", normalized)
     return normalized
+
+
+def _is_missing_author(value: Any) -> bool:
+    normalized = str(value or "").strip()
+    return not normalized or normalized.lower() in {"unknown", "none", "null", "-"}
+
+
+def _infer_post_handle(post: dict[str, Any]) -> str:
+    for field in ("author_handle", "source_handle", "handle", "username", "screen_name"):
+        value = str(post.get(field) or "").strip().lstrip("@")
+        if value and not _is_missing_author(value):
+            return value
+    for field in ("url", "original_url", "source_url", "canonical_url"):
+        handle = _handle_from_x_url(str(post.get(field) or ""))
+        if handle:
+            return handle
+    return ""
+
+
+def _handle_from_x_url(url: str) -> str:
+    match = re.search(r"https?://(?:www\.)?(?:x|twitter)\.com/([^/?#]+)/status/", str(url), re.IGNORECASE)
+    if not match:
+        return ""
+    handle = match.group(1).strip().lstrip("@")
+    if handle.lower() in {"i", "home", "search", "explore"}:
+        return ""
+    return handle
 
 
 def _hash_bytes(value: bytes) -> str:

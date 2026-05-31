@@ -1,0 +1,19 @@
+name: Dispatch Xiaohongshu Batch
+
+on:
+  schedule:
+    - cron: '0 0,8,16 * * *'
+  workflow_dispatch:
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger backend dispatch
+        env:
+          X_AIRTAP_RELAY_SECRET: ${{ secrets.X_AIRTAP_RELAY_SECRET }}
+        run: |
+          test -n "$X_AIRTAP_RELAY_SECRET"
+          curl --fail-with-body --show-error --silent \
+            -H "x-airtap-secret: $X_AIRTAP_RELAY_SECRET" \
+            "https://imgclean-api.vercel.app/api/airtap/xhs/dispatch"
