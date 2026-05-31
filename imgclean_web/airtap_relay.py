@@ -547,31 +547,245 @@ def render_wechat_pushplus(posts: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def render_xiaohongshu_note(posts: list[dict[str, Any]]) -> dict[str, Any]:
-    title = f"8小时市场观察：{len(posts)}条线索" if posts else "8小时市场观察：暂无新内容"
     if not posts:
-        body = "这 8 小时暂无新内容。"
-    else:
-        sections = []
-        for index, post in enumerate(posts, start=1):
-            sections.append(
-                "\n".join(
-                    item
-                    for item in [
-                        f"{index}. {_plain_author(post)}提到：{_plain_text(post)}",
-                        f"AI分析：{_editorial_take(post)}",
-                        _plain_quote(post),
-                        "有图/视频素材，可以在发小红书时配上。" if (post.get("image_urls") or post.get("video_urls")) else "",
-                    ]
-                    if item
-                )
-            )
-        body = "\n\n---\n\n".join(sections)
+        return {
+            "format": "note",
+            "title": "这 8 小时暂无适合发的选题",
+            "body": "这 8 小时没有收集到足够稳定的素材，先不硬发。",
+            "hashtags": ["美股", "投资观察"],
+        }
+
+    topic = _xhs_select_topic(posts)
+    body = _xhs_note_body(posts, topic)
     return {
         "format": "note",
-        "title": title,
+        "title": str(topic["title"]),
         "body": body,
-        "hashtags": ["X资讯", "科技股", "美股", "AI", "投资观察"],
+        "hashtags": list(topic["hashtags"]),
+        "source_count": len(posts),
+        "topic": str(topic["key"]),
+        "media_policy": _xhs_media_policy(posts),
     }
+
+
+XHS_TOPICS: tuple[dict[str, Any], ...] = (
+    {
+        "key": "dram",
+        "title": "存储股这轮，市场可能在换估值口径",
+        "hashtags": ["美股", "AI基建", "存储芯片", "投资观察"],
+        "keywords": ("dram", "hbm", "存储", "海力士", "美光", "micron", "三星", "sk hynix", "周期股", "成长股"),
+    },
+    {
+        "key": "ai_infra",
+        "title": "AI算力链又有新信号",
+        "hashtags": ["AI", "美股", "科技股", "投资观察"],
+        "keywords": ("nvda", "nvidia", "gpu", "ai", "算力", "数据中心", "datacenter", "data center", "光模块", "mrvl", "avgo"),
+    },
+    {
+        "key": "broker_tax",
+        "title": "交易这件事，绕不开基础设施",
+        "hashtags": ["美股", "交易记录", "投资观察", "税务"],
+        "keywords": ("券商", "报税", "税务", "broker", "tax", "robinhood", "清算", "合规"),
+    },
+    {
+        "key": "xiaomi_auto",
+        "title": "小米汽车的传播效率，确实值得单独看",
+        "hashtags": ["小米汽车", "新能源汽车", "商业观察", "产品设计"],
+        "keywords": ("xiaomi", "小米", "yu7", "汽车", "法拉利", "ferrari", "tesla", "特斯拉"),
+    },
+    {
+        "key": "earnings",
+        "title": "财报周先看预期差，不急着下判断",
+        "hashtags": ["美股财报", "科技股", "投资观察"],
+        "keywords": ("财报", "earnings", "guidance", "revenue", "eps", "业绩"),
+    },
+    {
+        "key": "market",
+        "title": "这批市场线索，我会先这样看",
+        "hashtags": ["美股", "投资观察", "市场记录"],
+        "keywords": (),
+    },
+)
+
+
+def _xhs_select_topic(posts: list[dict[str, Any]]) -> dict[str, Any]:
+    scores: dict[str, int] = {str(topic["key"]): 0 for topic in XHS_TOPICS}
+    first_match_index: dict[str, int] = {}
+    for index, post in enumerate(posts):
+        text = _xhs_search_text(post)
+        for topic in XHS_TOPICS:
+            key = str(topic["key"])
+            score = sum(1 for keyword in topic["keywords"] if str(keyword).lower() in text)
+            if score:
+                scores[key] += score
+                first_match_index.setdefault(key, index)
+    ranked = sorted(
+        XHS_TOPICS,
+        key=lambda topic: (
+            scores.get(str(topic["key"]), 0),
+            -first_match_index.get(str(topic["key"]), len(posts)),
+        ),
+        reverse=True,
+    )
+    winner = ranked[0]
+    if scores.get(str(winner["key"]), 0) <= 0:
+        return XHS_TOPICS[-1]
+    return winner
+
+
+def _xhs_search_text(post: dict[str, Any]) -> str:
+    parts = [str(post.get("text") or ""), str(post.get("author_name") or ""), str(post.get("author_handle") or "")]
+    quote = post.get("quote")
+    if isinstance(quote, dict):
+        parts.extend([str(quote.get("text") or ""), str(quote.get("author_name") or ""), str(quote.get("author_handle") or "")])
+    return " ".join(parts).lower()
+
+
+def _xhs_note_body(posts: list[dict[str, Any]], topic: dict[str, Any]) -> str:
+    key = str(topic["key"])
+    sections = [
+        _xhs_opening(posts, key),
+        f"AI分析：\n{_xhs_analysis(posts, key)}",
+        _xhs_media_policy(posts),
+        _xhs_image_plan(posts, key),
+        _xhs_close(key),
+    ]
+    return "\n\n".join(section for section in sections if section)
+
+
+def _xhs_opening(posts: list[dict[str, Any]], key: str) -> str:
+    if key == "dram":
+        quote_text = _xhs_first_quote_text(posts)
+        quote_line = f"引用里还有一句更直接：{_short_text(quote_text, 62)}" if quote_text else ""
+        return "\n".join(
+            item
+            for item in [
+                "今天这批素材里，最值得单独拎出来的是存储股。",
+                "有帖子提到，市场开始把存储从周期股往成长股 PE 上挪。这个变化比单日涨跌更关键。",
+                quote_line,
+            ]
+            if item
+        )
+    if key == "ai_infra":
+        signal = _xhs_first_post_text(posts)
+        return (
+            "这批素材指向一个老问题：AI 算力链里，到底还有哪些环节没有被充分定价。\n"
+            f"原始线索里有一句可以留着看：{signal}"
+        )
+    if key == "broker_tax":
+        signal = _xhs_first_post_text(posts)
+        return (
+            "这条线索不是在聊哪家券商好用，而是在提醒一件更底层的事。\n"
+            f"原帖里的核心句子是：{signal}"
+        )
+    if key == "xiaomi_auto":
+        signal = _xhs_first_post_text(posts)
+        return (
+            "小米汽车这类视频不适合直接搬，但它背后的传播效率值得记一笔。\n"
+            f"素材里的原话是：{signal}"
+        )
+    if key == "earnings":
+        signal = _xhs_first_post_text(posts)
+        return f"财报相关的线索先别急着当结论看，我会把它放进预期差清单里。\n原始线索：{signal}"
+    signal = _xhs_first_post_text(posts)
+    return f"这批内容暂时还没有形成特别集中的主题，我会先记成一条市场观察。\n原始线索：{signal}"
+
+
+def _xhs_analysis(posts: list[dict[str, Any]], key: str) -> str:
+    if key == "dram":
+        return (
+            "如果资金真的把 DRAM/HBM 放进 AI 基建框架，估值弹性会比传统周期股大。"
+            "但这条线不能只看口号，后面要盯美光、海力士、三星的盈利上修，以及现货价格有没有继续配合。"
+        )
+    if key == "ai_infra":
+        return (
+            "AI 这条链现在的问题不是有没有需求，而是哪一环开始从“卖铲子”变成瓶颈。"
+            "我会优先看订单、交付和毛利率，单纯一句看多不够。"
+        )
+    if key == "broker_tax":
+        return (
+            "很多人看交易只看买卖按钮，但券商、清算、税表和账户合规才是底座。"
+            "一旦这层处理不好，所谓低门槛交易反而可能变成后面的麻烦。"
+        )
+    if key == "xiaomi_auto":
+        return (
+            "小米车的话题扩散很快，说明它已经不只是车评内容，而是产品设计、品牌声量和用户审美在一起发酵。"
+            "真正要看的是这种关注能不能转成订单和复购，而不是单条视频有多热闹。"
+        )
+    if key == "earnings":
+        return "财报线索最怕只看标题。真正有用的是市场原来预期什么、公司实际交了什么、盘后资金怎么投票。"
+    if any(post.get("image_urls") or post.get("video_urls") for post in posts):
+        return "这批素材里有图片或视频，我会先看证据，再决定是不是值得扩展成一篇完整笔记。"
+    return "现在的信息密度还不够，先当观察点，等后续有没有更多账号或市场反应来验证。"
+
+
+def _xhs_media_policy(posts: list[dict[str, Any]]) -> str:
+    has_video = any(post.get("video_urls") for post in posts)
+    has_image = any(post.get("image_urls") for post in posts)
+    lines = []
+    if has_video:
+        lines.append("视频只作为素材线索，不要直接搬带平台水印的视频。发布时改成原创信息图、关键帧重绘，或者只写成文字观察。")
+    if has_image:
+        lines.append("原图也不要简单拼贴，适合重画成信息卡：保留逻辑，不保留平台外观。")
+    return "\n".join(lines)
+
+
+def _xhs_image_plan(posts: list[dict[str, Any]], key: str) -> str:
+    if key == "dram":
+        cards = [
+            "封面：存储股是不是在换估值？",
+            "图2：周期股视角和 AI 基建视角的差别",
+            "图3：接下来盯海力士、美光、三星的哪些指标",
+            "图4：风险，别把叙事当业绩",
+        ]
+    elif key == "ai_infra":
+        cards = [
+            "封面：AI 算力链还有哪里没定价？",
+            "图2：需求、交付、毛利率三条线",
+            "图3：把原始帖子里的信号改成观察清单",
+        ]
+    elif key == "broker_tax":
+        cards = [
+            "封面：交易不是只有买卖按钮",
+            "图2：券商、清算、税表、合规的关系",
+            "图3：普通投资者容易忽略的坑",
+        ]
+    elif key == "xiaomi_auto":
+        cards = [
+            "封面：小米车为什么这么容易被讨论？",
+            "图2：设计、价格、传播效率拆开看",
+            "图3：热度最后要回到订单验证",
+        ]
+    else:
+        cards = ["封面：这批市场线索先记下来", "图2：原始信号整理", "图3：后续要验证什么"]
+    return "配图建议：\n" + "\n".join(f"- {card}" for card in cards)
+
+
+def _xhs_close(key: str) -> str:
+    if key in {"dram", "ai_infra", "earnings"}:
+        return "不构成投资建议，我只是把这条线先放进观察清单。后面如果有财报或价格数据跟上，再单独拆。"
+    if key == "xiaomi_auto":
+        return "这类内容我会少看热闹，多看它能不能变成真实订单。"
+    return "先记下来，不急着下结论。"
+
+
+def _xhs_first_post_text(posts: list[dict[str, Any]]) -> str:
+    for post in posts:
+        text = _plain_text(post)
+        if text:
+            return _short_text(text, 90)
+    return "这批素材正文不多，先按主题留档。"
+
+
+def _xhs_first_quote_text(posts: list[dict[str, Any]]) -> str:
+    for post in posts:
+        quote = post.get("quote")
+        if not isinstance(quote, dict):
+            continue
+        text = _plain_text(quote)
+        if text:
+            return text
+    return ""
 
 
 def _wechat_post_row(post: dict[str, Any]) -> str:

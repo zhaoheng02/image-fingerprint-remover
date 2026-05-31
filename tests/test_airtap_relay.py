@@ -213,13 +213,15 @@ def test_airtap_posts_render_enriches_profiles_without_marking_seen(tmp_path, mo
     assert "https://airtap.ai/content/live/android-files/clip.mp4" in rendered["channels"]["wechat"]["content"]
     assert "/api/airtap/avatars/" not in rendered["channels"]["wechat"]["content"]
     assert rendered["channels"]["xiaohongshu"]["format"] == "note"
-    assert rendered["channels"]["xiaohongshu"]["title"] == "8小时市场观察：1条线索"
+    assert rendered["channels"]["xiaohongshu"]["title"] == "AI算力链又有新信号"
     assert "AI分析：" in rendered["channels"]["xiaohongshu"]["body"]
     assert "我会这么看：" not in rendered["channels"]["xiaohongshu"]["body"]
     assert "这 8 小时我帮你" not in rendered["channels"]["xiaohongshu"]["body"]
     assert "整体看下来" not in rendered["channels"]["xiaohongshu"]["body"]
     assert "NVDA keeps shipping <fast>." in rendered["channels"]["xiaohongshu"]["body"]
     assert "https://airtap.ai/content/live/android-files/chart.png" not in rendered["channels"]["xiaohongshu"]["body"]
+    assert "视频只作为素材线索" in rendered["channels"]["xiaohongshu"]["body"]
+    assert "配图建议" in rendered["channels"]["xiaohongshu"]["body"]
 
     second_preview = client.post(
         "/api/airtap/posts/render",
@@ -230,6 +232,56 @@ def test_airtap_posts_render_enriches_profiles_without_marking_seen(tmp_path, mo
     assert second_preview.status_code == 200
     assert second_preview.json()["new_count"] == 1
     assert second_preview.json()["duplicate_count"] == 0
+
+
+def test_airtap_xhs_note_turns_mixed_posts_into_one_publishable_topic(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/airtap/posts/render",
+        headers={"x-airtap-secret": "relay-secret"},
+        json={
+            "scope": "xhs-topic-shape",
+            "channels": ["xiaohongshu"],
+            "posts": [
+                {
+                    "id": "dram-quote-1",
+                    "author_name": "川沐｜Trumoo",
+                    "author_handle": "xiaomustock",
+                    "text": "市场里的机构开始把存储定义成长股 PE 了。HODL，$DRAM 坚持。",
+                    "quote": {
+                        "author_name": "川沐｜Trumoo",
+                        "author_handle": "xiaomustock",
+                        "text": "海力士韩国开盘爆拉5%，等市场把存储股从周期股定为成长股。",
+                    },
+                    "image_urls": ["https://pbs.twimg.com/media/HJpvlt6XUAIesk5?format=jpg&name=medium"],
+                },
+                {
+                    "id": "xiaomi-video-1",
+                    "author_name": "RamenPanda",
+                    "author_handle": "IamRamenPanda",
+                    "text": "xiaomi Yu7 GT，这不比那个 Ferrari 车好看多了？",
+                    "image_urls": ["https://pbs.twimg.com/amplify_video_thumb/2059159900245426176/img/pynjjJlpEE2xlwxR.jpg"],
+                    "video_urls": ["https://video.twimg.com/amplify_video/2059159900245426176/vid/avc1/320x568/clip.mp4"],
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    channel = response.json()["channels"]["xiaohongshu"]
+    assert channel["format"] == "note"
+    assert channel["title"] == "存储股这轮，市场可能在换估值口径"
+    assert "AI分析：" in channel["body"]
+    assert "海力士韩国开盘爆拉5%" in channel["body"]
+    assert "视频只作为素材线索" in channel["body"]
+    assert "不要直接搬带平台水印的视频" in channel["body"]
+    assert "配图建议" in channel["body"]
+    assert "1. 川沐" not in channel["body"]
+    assert "2. RamenPanda" not in channel["body"]
+    assert "RamenPanda提到" not in channel["body"]
+    assert "https://video.twimg.com" not in channel["body"]
+    assert "x.com/" not in channel["body"]
 
 
 def test_wechat_digest_uses_text_avatar_and_hides_source_links(tmp_path, monkeypatch):
@@ -836,7 +888,7 @@ def test_airtap_xhs_dispatch_uses_stored_hourly_posts_without_rescrape(tmp_path,
     payload = dispatch.json()
     assert payload["ok"] is True
     assert payload["post_count"] == 1
-    assert payload["channels"]["xiaohongshu"]["title"] == "8小时市场观察：1条线索"
+    assert payload["channels"]["xiaohongshu"]["title"] == "交易这件事，绕不开基础设施"
     assert "炒股需要券商" in payload["channels"]["xiaohongshu"]["body"]
     assert payload["airtap"]["ok"] is False
     assert payload["airtap"]["reason"] == "dry_run"
@@ -1013,6 +1065,8 @@ def test_airtap_xhs_confirmation_endpoint_creates_publish_task(tmp_path, monkeyp
     message = airtap_call[2]["userMessage"]["parts"][0]["text"]
     assert headers["Authorization"] == "Bearer airtap-token"
     assert "Do not open X" in message
+    assert "Use the Xiaohongshu mobile app only" in message
+    assert "Do not use the web publisher" in message
     assert "下周重点关注这几个财报" in message
     assert "relay-secret" not in message
 
@@ -1151,6 +1205,9 @@ def test_airtap_posts_render_uses_ai_composer_when_configured(tmp_path, monkeypa
     assert calls[0][2]["model"] == "gpt-5.5"
     assert "需要生成的渠道：xiaohongshu" in calls[0][2]["input"]
     assert "NVDA keeps shipping." in calls[0][2]["input"]
+    assert "小红书不是 X 原帖搬运" in calls[0][2]["input"]
+    assert "不要逐条按作者罗列" in calls[0][2]["input"]
+    assert "带平台水印的视频只能作为素材线索" in calls[0][2]["input"]
 
 
 def test_airtap_posts_render_skips_ai_composer_for_wechat_only(tmp_path, monkeypatch):

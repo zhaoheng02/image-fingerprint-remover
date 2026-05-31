@@ -172,7 +172,7 @@ Phone-side Airtap publishing contract:
 2. Airtap calls `/api/airtap/profiles/upsert` for display-name/handle mappings. Avatar URLs are optional; do not ask Airtap to spend extra steps opening image tabs to obtain direct avatar URLs.
 3. Airtap calls `/api/airtap/posts/publish` with `scope="x-hourly-wechat"` and `channels=["wechat"]`. WeChat delivery is handled by the backend through PushPlus; Airtap must not call PushPlus directly.
 4. The backend stores the full hourly post payload after dedupe. Airtap must not scrape an 8-hour X history.
-5. A cloud scheduler calls `/api/airtap/xhs/dispatch` every 8 hours. That endpoint reads the stored hourly posts, generates the Xiaohongshu note, and pushes a WeChat approval preview. Only after the user taps the signed confirmation link does the backend create the Airtap task to publish through the Xiaohongshu app.
+5. A cloud scheduler calls `/api/airtap/xhs/dispatch` every 8 hours. That endpoint reads the stored hourly posts, generates the Xiaohongshu note, and pushes a WeChat approval preview. Only after the user taps the signed confirmation link does the backend create the Airtap task to publish through the Xiaohongshu mobile app. Do not use the Xiaohongshu web publisher, browser, desktop uploader, or third-party web publishing tooling as a fallback.
 6. Never put PushPlus tokens or OpenAI keys into Airtap prompts. The only Airtap-side secret should be `AIRTAP_RELAY_SECRET`, sent as the `x-airtap-secret` header or Bearer token when calling the backend.
 
 Generate the exact Airtap prompt from the local machine:

@@ -79,10 +79,10 @@ def _print_channel_prompt(api_base: str, secret: str, *, channel_plan: str, dry_
     xhs_steps = ""
     if not is_wechat:
         final_publish = (
-            "After filling the Xiaohongshu title, body, hashtags, and attachable media, stop before tapping the final publish button. "
+            "After filling the Xiaohongshu title, body, hashtags, and attachable media in the Xiaohongshu mobile app, stop before tapping the final publish button. "
             "Report the draft state and screenshots."
             if dry_run
-            else "After filling the Xiaohongshu title, body, hashtags, and attachable media, publish the note through the Xiaohongshu app."
+            else "After filling the Xiaohongshu title, body, hashtags, and attachable media, publish the note through the Xiaohongshu mobile app only. Do not use the web publisher."
         )
         dry_run_safety = (
             "DRY RUN SAFETY: Do not tap Publish, Post, Next, 下一步, 发布, or any final submission button. "
@@ -92,7 +92,7 @@ def _print_channel_prompt(api_base: str, secret: str, *, channel_plan: str, dry_
         )
         xhs_steps = f"""
 15. If response.new_count is 0, stop. Do not open Xiaohongshu.
-16. If response.new_count is greater than 0, open Xiaohongshu and create a note using exactly:
+16. If response.new_count is greater than 0, open the installed Xiaohongshu mobile app on the Airtap phone. Do not use xiaohongshu.com, a browser, the web publisher, a desktop uploader, or any third-party web publishing tool. Create a note using exactly:
    - title: response.channels.xiaohongshu.title
    - body: response.channels.xiaohongshu.body
    - hashtags: response.channels.xiaohongshu.hashtags
@@ -209,7 +209,7 @@ def _print_xhs_smoke_prompt(api_base: str, secret: str) -> None:
 Run on the cloud phone. This is a safe dry run: Do not send anything to PushPlus, do not publish a Xiaohongshu note, and do not invent local copy.
 
 Goal:
-Verify that the phone can call the backend, receive backend-produced Xiaohongshu copy, open Xiaohongshu, fill a draft, and stop before tapping the final publish button.
+Verify that the phone can call the backend, receive backend-produced Xiaohongshu copy, open the Xiaohongshu mobile app, fill a draft, and stop before tapping the final publish button. Do not use the web publisher.
 
 Backend call:
 Use Termux/curl or another reliable HTTP client on the cloud phone. The backend response is a hard gate.
@@ -238,7 +238,7 @@ Body:
 Required behavior:
 1. The backend call must return HTTP 200 JSON before opening Xiaohongshu.
 2. Confirm response.new_count is 1, response.channels.xiaohongshu.title is present, and response.channels.xiaohongshu.body is present.
-3. Open Xiaohongshu on the phone and create a note using exactly:
+3. Open the installed Xiaohongshu mobile app on the phone and create a note using exactly:
    - title: response.channels.xiaohongshu.title
    - body: response.channels.xiaohongshu.body
    - hashtags: response.channels.xiaohongshu.hashtags
