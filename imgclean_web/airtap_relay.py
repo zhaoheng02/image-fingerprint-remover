@@ -312,19 +312,18 @@ def render_wechat_pushplus(posts: list[dict[str, Any]]) -> dict[str, Any]:
             "</div>"
         )
     else:
-        rows = [_wechat_post_row(post) for post in posts]
+        cards = [_wechat_post_row(post) for post in posts]
         content = (
             '<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;'
-            'background:#f8fafc;padding:12px;">'
+            'background:#f8fafc;padding:10px;max-width:100%;box-sizing:border-box;">'
             '<div style="padding:14px 16px;margin-bottom:10px;border-radius:10px;'
             'background:#111827;color:#fff;">'
             '<div style="font-size:13px;color:#cbd5e1;">Airtap 自动抓取 · Codex 内容整理</div>'
             f'<div style="font-size:20px;font-weight:800;line-height:1.35;margin-top:4px;">{html.escape(title)}</div>'
-            '<div style="font-size:12px;color:#94a3b8;margin-top:4px;">仅推送本小时新内容，重复帖子已自动去重。</div>'
+            '<div style="font-size:12px;color:#94a3b8;margin-top:4px;">正文、引用和图片已直接整理在微信内；原文链接仅作备用。</div>'
             "</div>"
-            '<table style="width:100%;border-collapse:separate;border-spacing:0 10px;">'
-            + "".join(rows)
-            + "</table></div>"
+            + "".join(cards)
+            + "</div>"
         )
     return {
         "target": "pushplus",
@@ -373,34 +372,43 @@ def render_xiaohongshu_note(posts: list[dict[str, Any]]) -> dict[str, Any]:
 def _wechat_post_row(post: dict[str, Any]) -> str:
     avatar = html.escape(str(post.get("avatar_url") or ""))
     avatar_cell = (
-        f'<img src="{avatar}" alt="" style="width:46px;height:46px;border-radius:50%;object-fit:cover;border:1px solid #e5e7eb;">'
+        f'<img src="{avatar}" alt="" style="display:block;width:42px;height:42px;border-radius:50%;object-fit:cover;border:1px solid #e5e7eb;">'
         if avatar
-        else '<div style="width:46px;height:46px;border-radius:50%;background:linear-gradient(135deg,#dbeafe,#e0e7ff);"></div>'
+        else '<div style="width:42px;height:42px;border-radius:50%;background:#dbeafe;"></div>'
     )
     media = _wechat_media(post)
     quote = _wechat_quote(post)
-    author = html.escape(_plain_author(post))
+    author_name, author_handle = _wechat_author_parts(post)
+    author = html.escape(author_name)
+    handle = html.escape(f"@{author_handle}") if author_handle else ""
+    handle_line = (
+        f'<div style="font-size:12px;color:#64748b;line-height:1.35;word-break:break-all;overflow-wrap:anywhere;">{handle}</div>'
+        if handle
+        else ""
+    )
     time_text = html.escape(str(post.get("published_at") or ""))
     text = html.escape(str(post.get("text") or ""))
     url = html.escape(str(post.get("url") or ""))
     source = (
-        f'<div style="margin-top:12px;"><a href="{url}" '
-        'style="display:inline-block;color:#2563eb;text-decoration:none;font-weight:700;">查看原文 →</a></div>'
+        '<div style="margin-top:12px;padding:8px 10px;background:#f8fafc;border-radius:8px;'
+        'font-size:12px;line-height:1.5;color:#64748b;word-break:break-all;overflow-wrap:anywhere;">'
+        f"原文链接（备用）：{url}</div>"
         if url
         else ""
     )
     return (
-        '<tr>'
-        '<td style="width:64px;vertical-align:top;padding:16px 10px 16px 14px;'
-        'background:#fff;border:1px solid #e5e7eb;border-right:0;border-radius:10px 0 0 10px;">'
-        f"{avatar_cell}</td>"
-        '<td style="vertical-align:top;padding:16px 14px 16px 0;background:#fff;'
-        'border:1px solid #e5e7eb;border-left:0;border-radius:0 10px 10px 0;">'
-        f'<div style="font-weight:800;color:#0f172a;font-size:15px;">{author}</div>'
-        f'<div style="font-size:12px;color:#64748b;margin:3px 0 10px;">{time_text}</div>'
-        f'<div style="white-space:pre-wrap;line-height:1.65;color:#111827;font-size:15px;">{text}</div>'
+        '<div style="margin:10px 0;padding:14px;background:#fff;border:1px solid #e5e7eb;'
+        'border-radius:10px;max-width:100%;box-sizing:border-box;overflow:hidden;">'
+        '<div style="min-height:44px;margin-bottom:10px;">'
+        f'<div style="float:left;margin-right:10px;">{avatar_cell}</div>'
+        f'<div style="font-weight:800;color:#0f172a;font-size:16px;line-height:1.35;word-break:break-word;overflow-wrap:anywhere;">{author}</div>'
+        f"{handle_line}"
+        f'<div style="font-size:12px;color:#64748b;margin-top:2px;line-height:1.35;">{time_text}</div>'
+        '<div style="clear:both;"></div>'
+        "</div>"
+        f'<div style="white-space:pre-wrap;line-height:1.7;color:#111827;font-size:15px;word-break:break-word;overflow-wrap:anywhere;">{text}</div>'
         f"{quote}{media}{source}"
-        "</td></tr>"
+        "</div>"
     )
 
 
@@ -412,23 +420,31 @@ def _wechat_quote(post: dict[str, Any]) -> str:
     text = html.escape(str(quote.get("text") or ""))
     return (
         '<div style="margin-top:12px;padding:10px 12px;border-left:4px solid #38bdf8;'
-        'background:#f0f9ff;color:#334155;border-radius:8px;">'
+        'background:#f0f9ff;color:#334155;border-radius:8px;word-break:break-word;overflow-wrap:anywhere;">'
         f'<div style="font-size:12px;font-weight:700;">引用：{author}</div>'
-        f'<div style="white-space:pre-wrap;line-height:1.55;margin-top:4px;">{text}</div>'
+        f'<div style="white-space:pre-wrap;line-height:1.6;margin-top:4px;">{text}</div>'
         "</div>"
     )
 
 
 def _wechat_media(post: dict[str, Any]) -> str:
     lines = []
-    for label, urls in (("图片", post.get("image_urls") or []), ("视频", post.get("video_urls") or [])):
+    for url in post.get("image_urls") or []:
+        safe_url = html.escape(str(url))
+        lines.append(
+            '<div style="margin-top:12px;">'
+            f'<img src="{safe_url}" alt="图片" style="display:block;width:100%;height:auto;max-width:100%;'
+            'border-radius:8px;border:1px solid #e5e7eb;background:#f8fafc;">'
+            "</div>"
+        )
+    for label, urls in (("视频素材", post.get("video_urls") or []),):
         for url in urls:
             safe_url = html.escape(str(url))
             lines.append(
                 '<div style="margin-top:6px;padding:8px 10px;background:#f8fafc;border-radius:8px;'
-                'border:1px solid #e2e8f0;">'
+                'border:1px solid #e2e8f0;word-break:break-all;overflow-wrap:anywhere;">'
                 f'<span style="font-weight:700;color:#0f172a;">{html.escape(label)}</span>：'
-                f'<a href="{safe_url}" style="color:#2563eb;text-decoration:none;">{safe_url}</a>'
+                f'<span style="color:#475569;">{safe_url}</span>'
                 "</div>"
             )
     if not lines:
@@ -442,6 +458,14 @@ def _plain_author(post: dict[str, Any]) -> str:
     if handle and handle.lower() not in author.lower():
         return f"{author} (@{handle})"
     return author
+
+
+def _wechat_author_parts(post: dict[str, Any]) -> tuple[str, str]:
+    author = str(post.get("author_name") or post.get("author_handle") or "Unknown").strip()
+    handle = str(post.get("author_handle") or "").strip().lstrip("@")
+    if handle and handle.lower() in author.lower():
+        return author, ""
+    return author, handle
 
 
 def _plain_quote(post: dict[str, Any]) -> str:

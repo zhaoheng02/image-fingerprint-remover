@@ -160,8 +160,10 @@ def test_airtap_posts_render_enriches_profiles_without_marking_seen(tmp_path, mo
     assert rendered["channels"]["wechat"]["template"] == "html"
     assert "xiao mu" in rendered["channels"]["wechat"]["content"]
     assert "NVDA keeps shipping &lt;fast&gt;." in rendered["channels"]["wechat"]["content"]
-    assert "<table" in rendered["channels"]["wechat"]["content"]
+    assert "<table" not in rendered["channels"]["wechat"]["content"]
     assert "Airtap 自动抓取" in rendered["channels"]["wechat"]["content"]
+    assert "原文链接（备用）" in rendered["channels"]["wechat"]["content"]
+    assert "<img src=\"https://airtap.ai/content/live/android-files/chart.png\"" in rendered["channels"]["wechat"]["content"]
     assert "/api/airtap/avatars/" in rendered["channels"]["wechat"]["content"]
     assert rendered["channels"]["xiaohongshu"]["format"] == "note"
     assert rendered["channels"]["xiaohongshu"]["title"] == "X 科技/美股快讯：1 条值得看"
