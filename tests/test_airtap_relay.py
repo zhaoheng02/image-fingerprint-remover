@@ -24,6 +24,13 @@ def _avatar_base64() -> str:
     return base64.b64encode(buf.getvalue()).decode("ascii")
 
 
+def _large_image_bytes() -> bytes:
+    image = Image.effect_noise((900, 600), 80).convert("RGB")
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def test_airtap_profiles_upsert_stores_avatar_and_supports_lookup(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
 
@@ -206,6 +213,59 @@ def test_airtap_posts_render_enriches_profiles_without_marking_seen(tmp_path, mo
     assert second_preview.status_code == 200
     assert second_preview.json()["new_count"] == 1
     assert second_preview.json()["duplicate_count"] == 0
+
+
+def test_airtap_posts_render_inlines_avatar_and_media_separately(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    image_bytes = _large_image_bytes()
+    media_url = "https://airtap.ai/content/live/android-files/shared-large.png"
+
+    class FakeResponse:
+        content = image_bytes
+        headers = {"content-type": "image/png"}
+
+        def raise_for_status(self):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, timeout, follow_redirects=False):
+            self.timeout = timeout
+            self.follow_redirects = follow_redirects
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            assert url == media_url
+            return FakeResponse()
+
+    monkeypatch.setattr("imgclean_web.app.httpx.AsyncClient", FakeAsyncClient)
+
+    response = client.post(
+        "/api/airtap/posts/render",
+        headers={"x-airtap-secret": "relay-secret"},
+        json={
+            "scope": "x-hourly-inline-shared",
+            "channels": ["wechat"],
+            "posts": [
+                {
+                    "id": "tweet-inline-shared-1",
+                    "author_name": "xiao mu",
+                    "avatar_url": media_url,
+                    "text": "头像和正文图片都需要直接内嵌。",
+                    "image_urls": [media_url],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    content = response.json()["channels"]["wechat"]["content"]
+    assert content.count('src="data:image/jpeg;base64,') >= 2
+    assert '<img src="https://' not in content
 
 
 def test_airtap_posts_render_does_not_prevent_later_publish(tmp_path, monkeypatch):

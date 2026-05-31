@@ -52,6 +52,8 @@ WECHAT_MINIPROGRAM_SESSION_URL = "https://api.weixin.qq.com/sns/jscode2session"
 AIRTAP_MAX_AVATAR_BYTES = 2 * 1024 * 1024
 AIRTAP_AVATAR_CONTENT_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
 AIRTAP_WECHAT_INLINE_SOURCE_MAX_BYTES = 6 * 1024 * 1024
+AIRTAP_WECHAT_INLINE_AVATAR_OUTPUT_MAX_BYTES = 4 * 1024
+AIRTAP_WECHAT_INLINE_AVATAR_MAX_EDGES = (96, 72, 48)
 AIRTAP_WECHAT_INLINE_OUTPUT_MAX_BYTES = 28 * 1024
 AIRTAP_WECHAT_INLINE_TOTAL_MAX_CHARS = 48 * 1024
 AIRTAP_WECHAT_INLINE_MAX_EDGES = (480, 360, 280)
@@ -930,32 +932,46 @@ async def _download_airtap_profile_avatars(profiles: list[Any]) -> list[dict[str
 
 
 async def _inline_airtap_wechat_media(posts: list[dict[str, Any]]) -> None:
-    urls: list[str] = []
+    avatar_urls: list[str] = []
+    image_urls: list[str] = []
     for post in posts:
         avatar_url = str(post.get("avatar_url") or "").strip()
         if avatar_url:
-            urls.append(avatar_url)
+            avatar_urls.append(avatar_url)
         for url in post.get("image_urls") or []:
             if url:
-                urls.append(str(url))
-    if not urls:
+                image_urls.append(str(url))
+    if not avatar_urls and not image_urls:
         return
 
-    cache: dict[str, str] = {}
+    avatar_cache: dict[str, str] = {}
+    image_cache: dict[str, str] = {}
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        for url in dict.fromkeys(urls):
-            cache[url] = await _download_inline_image_data_uri(client, url)
+        for url in dict.fromkeys(avatar_urls):
+            avatar_cache[url] = await _download_inline_image_data_uri(
+                client,
+                url,
+                max_edges=AIRTAP_WECHAT_INLINE_AVATAR_MAX_EDGES,
+                output_max_bytes=AIRTAP_WECHAT_INLINE_AVATAR_OUTPUT_MAX_BYTES,
+            )
+        for url in dict.fromkeys(image_urls):
+            image_cache[url] = await _download_inline_image_data_uri(
+                client,
+                url,
+                max_edges=AIRTAP_WECHAT_INLINE_MAX_EDGES,
+                output_max_bytes=AIRTAP_WECHAT_INLINE_OUTPUT_MAX_BYTES,
+            )
 
     remaining_chars = AIRTAP_WECHAT_INLINE_TOTAL_MAX_CHARS
     for post in posts:
         avatar_url = str(post.get("avatar_url") or "").strip()
-        avatar_data_uri = cache.get(avatar_url, "")
+        avatar_data_uri = avatar_cache.get(avatar_url, "")
         if avatar_data_uri and len(avatar_data_uri) <= remaining_chars:
             post["avatar_data_uri"] = avatar_data_uri
             remaining_chars -= len(avatar_data_uri)
         image_data_uris = []
         for url in post.get("image_urls") or []:
-            data_uri = cache.get(str(url))
+            data_uri = image_cache.get(str(url))
             if data_uri and len(data_uri) <= remaining_chars:
                 image_data_uris.append(data_uri)
                 remaining_chars -= len(data_uri)
@@ -963,7 +979,13 @@ async def _inline_airtap_wechat_media(posts: list[dict[str, Any]]) -> None:
             post["image_data_uris"] = image_data_uris
 
 
-async def _download_inline_image_data_uri(client: httpx.AsyncClient, url: str) -> str:
+async def _download_inline_image_data_uri(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    max_edges: tuple[int, ...],
+    output_max_bytes: int,
+) -> str:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"}:
         return ""
@@ -981,16 +1003,21 @@ async def _download_inline_image_data_uri(client: httpx.AsyncClient, url: str) -
         logger.warning("Airtap WeChat image too large to inline: url=%s bytes=%s", url, len(content))
         return ""
     try:
-        return _image_bytes_to_jpeg_data_uri(content)
+        return _image_bytes_to_jpeg_data_uri(content, max_edges=max_edges, output_max_bytes=output_max_bytes)
     except (OSError, UnidentifiedImageError, ValueError) as exc:
         logger.warning("Airtap WeChat image encode failed: url=%s error=%s", url, exc)
         return ""
 
 
-def _image_bytes_to_jpeg_data_uri(content: bytes) -> str:
+def _image_bytes_to_jpeg_data_uri(
+    content: bytes,
+    *,
+    max_edges: tuple[int, ...],
+    output_max_bytes: int,
+) -> str:
     source = Image.open(io.BytesIO(content))
     output = io.BytesIO()
-    for edge in AIRTAP_WECHAT_INLINE_MAX_EDGES:
+    for edge in max_edges:
         image = source.copy()
         image.thumbnail((edge, edge))
         if image.mode in {"RGBA", "LA"}:
@@ -1003,7 +1030,7 @@ def _image_bytes_to_jpeg_data_uri(content: bytes) -> str:
             output.seek(0)
             output.truncate(0)
             image.save(output, format="JPEG", quality=quality, optimize=True)
-            if output.tell() <= AIRTAP_WECHAT_INLINE_OUTPUT_MAX_BYTES:
+            if output.tell() <= output_max_bytes:
                 return "data:image/jpeg;base64," + base64.b64encode(output.getvalue()).decode("ascii")
     raise ValueError("encoded image is too large")
 
