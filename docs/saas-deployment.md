@@ -179,10 +179,11 @@ Generate the exact Airtap prompt from the local machine:
 
 ```bash
 scripts/airtap_x_hourly_prompt.py --dry-run
+scripts/airtap_x_hourly_prompt.py --xhs-smoke
 scripts/airtap_x_hourly_prompt.py
 ```
 
-The script reads `AIRTAP_RELAY_SECRET` from the environment, or from `~/.codex/secrets/imgclean-airtap-relay-secret`. Use `--dry-run` to verify Xiaohongshu reaches the draft screen without tapping the final publish button. Omit `--dry-run` for the production Airtap routine. WeChat content is self-contained in the PushPlus HTML; do not ask Airtap to create extra WeChat links or call PushPlus.
+The script reads `AIRTAP_RELAY_SECRET` from the environment, or from `~/.codex/secrets/imgclean-airtap-relay-secret`. Use `--xhs-smoke` to verify the cloud phone can call `/api/airtap/posts/render` and fill a Xiaohongshu draft without sending WeChat or writing dedupe state. Use `--dry-run` to run the real X hourly flow and stop before tapping the final Xiaohongshu publish button. Omit `--dry-run` for the production Airtap routine. WeChat content is self-contained in the PushPlus HTML; do not ask Airtap to create extra WeChat links or call PushPlus.
 
 ## Watermark Removal
 
