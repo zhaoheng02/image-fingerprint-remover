@@ -557,6 +557,47 @@ def test_airtap_xhs_dispatch_uses_stored_hourly_posts_without_rescrape(tmp_path,
     assert payload["airtap"]["reason"] == "dry_run"
 
 
+def test_airtap_xhs_dispatch_skips_demo_hourly_posts(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    publish = client.post(
+        "/api/airtap/posts/publish",
+        headers={"x-airtap-secret": "relay-secret"},
+        json={
+            "scope": "x-hourly-wechat",
+            "channels": ["wechat"],
+            "posts": [
+                {
+                    "id": "demo-1",
+                    "author_handle": "codex_smoke",
+                    "published_at": "样式验证",
+                    "text": "这是一条样式验证内容，不应该进入定时小红书汇总。",
+                    "url": "https://x.com/codex_smoke/status/demo-1",
+                },
+                {
+                    "id": "tweet-hourly-real-1",
+                    "author_handle": "IamRamenPanda",
+                    "text": "炒股需要券商的根本原因是券商要报税。",
+                    "url": "https://x.com/IamRamenPanda/status/2060993144800625145",
+                },
+            ],
+        },
+    )
+
+    assert publish.status_code == 200
+
+    dispatch = client.get(
+        "/api/airtap/xhs/dispatch",
+        headers={"x-airtap-secret": "relay-secret"},
+        params={"dry_run": "1"},
+    )
+
+    assert dispatch.status_code == 200
+    payload = dispatch.json()
+    assert payload["post_count"] == 1
+    assert "炒股需要券商" in payload["channels"]["xiaohongshu"]["body"]
+    assert "样式验证" not in payload["channels"]["xiaohongshu"]["body"]
+
+
 def test_airtap_xhs_dispatch_creates_publish_task_from_stored_posts(tmp_path, monkeypatch):
     monkeypatch.setenv("AIRTAP_PERSONAL_ACCESS_TOKEN", "airtap-token")
     calls = []

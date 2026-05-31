@@ -132,6 +132,8 @@ class LocalAirtapRelayStore:
                         "published_at": item.get("published_at", ""),
                         "url": item.get("url", ""),
                     }
+                if _is_demo_post(post):
+                    continue
                 if not _has_dispatch_content(post):
                     continue
                 recent_items.append((first_seen_at, post))
@@ -755,6 +757,24 @@ def _has_dispatch_content(post: dict[str, Any]) -> bool:
     if isinstance(quote, dict) and str(quote.get("text") or "").strip():
         return True
     return bool(post.get("image_urls") or post.get("video_urls"))
+
+
+def _is_demo_post(post: dict[str, Any]) -> bool:
+    values = [
+        str(post.get("id") or ""),
+        str(post.get("url") or ""),
+        str(post.get("author_handle") or ""),
+        str(post.get("published_at") or ""),
+    ]
+    haystack = " ".join(values).lower()
+    demo_markers = (
+        "demo-",
+        "codex_smoke",
+        "xhs-smoke",
+        "smoke run",
+        "样式验证",
+    )
+    return any(marker in haystack for marker in demo_markers)
 
 
 def _decode_avatar(profile: dict[str, Any]) -> bytes:
