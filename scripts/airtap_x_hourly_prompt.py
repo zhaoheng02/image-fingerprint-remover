@@ -52,13 +52,14 @@ Accounts to check on X:
 Collection rules:
 1. Open https://x.com/home in Chrome and search/check each account above.
 2. On the first run of the day, collect all posts from today. On later runs, collect only posts published in the past hour.
-3. For every post, extract these raw fields exactly: id or canonical URL, author display name, author handle, avatar image URL, relative/absolute publish time, original text, quote author/text when present, original post URL, image URLs, and video URLs.
-4. Download or keep Airtap live URLs for images/videos when possible. Do not summarize posts in Airtap; the backend owns formatting, dedupe, and WeChat delivery.
-5. For any profile with a new/refreshed avatar, call:
+3. For every post, extract these raw fields exactly: id or canonical URL, author display name, author handle, relative/absolute publish time, original text, quote author/text when present, original post URL, image URLs, and video URLs.
+4. For avatars, use an already visible/easy profile avatar URL when available. Do not open image tabs or spend extra steps trying to obtain direct avatar URLs; omitting avatar_url is acceptable.
+5. Download or keep Airtap live URLs for images/videos when possible. Do not summarize posts in Airtap; the backend owns formatting, dedupe, and WeChat delivery.
+6. For profiles with display names/handles, call:
    POST {args.api_base.rstrip("/")}/api/airtap/profiles/upsert
    Headers: content-type: application/json, x-airtap-secret: {secret}
-   Body: {{"profiles":[{{"display_name":"...","handle":"...","avatar_url":"..."}}]}}
-6. Then call:
+   Body: {{"profiles":[{{"display_name":"...","handle":"...","avatar_url":"optional"}}]}}
+7. Then call:
    POST {args.api_base.rstrip("/")}/api/airtap/posts/publish
    Headers: content-type: application/json, x-airtap-secret: {secret}
    Body shape:
@@ -79,14 +80,14 @@ Collection rules:
        }}
      ]
    }}
-7. If response.new_count is 0, stop. WeChat will not be pushed and Xiaohongshu should not be posted.
-8. If response.new_count is greater than 0, WeChat has already been pushed by the backend. Open Xiaohongshu and create a note using:
+8. If response.new_count is 0, stop. WeChat will not be pushed and Xiaohongshu should not be posted.
+9. If response.new_count is greater than 0, WeChat has already been pushed by the backend. Open Xiaohongshu and create a note using:
    - title: response.channels.xiaohongshu.title
    - body: response.channels.xiaohongshu.body
    - hashtags: response.channels.xiaohongshu.hashtags
    - media: attach the collected local images/videos when the app allows it; otherwise leave the media links in the body.
-9. {final_publish}
-10. Report the backend publish response summary, Xiaohongshu publish/draft result, and any blocked step. Never expose PushPlus token, OpenAI key, or the relay secret in the final report.
+10. {final_publish}
+11. Report the backend publish response summary, Xiaohongshu publish/draft result, and any blocked step. Never expose PushPlus token, OpenAI key, or the relay secret in the final report.
 """
     )
 
