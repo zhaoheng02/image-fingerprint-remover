@@ -92,7 +92,7 @@ def _print_channel_prompt(api_base: str, secret: str, *, channel_plan: str, dry_
         )
         xhs_steps = f"""
 15. If response.new_count is 0, stop. Do not open Xiaohongshu.
-16. If response.new_count is greater than 0, open the installed Xiaohongshu mobile app on the Airtap phone. Do not use xiaohongshu.com, a browser, the web publisher, a desktop uploader, or any third-party web publishing tool. Create a note using exactly:
+16. If response.new_count is greater than 0, open the installed Xiaohongshu mobile app on the Airtap phone. Do not use xiaohongshu.com, a browser, the web publisher, a desktop uploader, or any third-party web publishing tool. If the app shows a text note screen with a Write article option, prefer Write article for long copy. If the app does not expose stable separate title/body fields, paste the title, body, and hashtags as one combined text in the main editor field. Create a note using exactly:
    - title: response.channels.xiaohongshu.title
    - body: response.channels.xiaohongshu.body
    - hashtags: response.channels.xiaohongshu.hashtags
@@ -238,7 +238,7 @@ Body:
 Required behavior:
 1. The backend call must return HTTP 200 JSON before opening Xiaohongshu.
 2. Confirm response.new_count is 1, response.channels.xiaohongshu.title is present, and response.channels.xiaohongshu.body is present.
-3. Open the installed Xiaohongshu mobile app on the phone and create a note using exactly:
+3. Open the installed Xiaohongshu mobile app on the phone. If the app shows a text note screen with a Write article option, use Write article for the draft. If the app does not expose stable separate title/body fields, paste the title, body, and hashtags as one combined text in the main editor field. Create a note using exactly:
    - title: response.channels.xiaohongshu.title
    - body: response.channels.xiaohongshu.body
    - hashtags: response.channels.xiaohongshu.hashtags

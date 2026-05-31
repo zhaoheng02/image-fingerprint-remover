@@ -27,6 +27,7 @@ def test_xhs_smoke_prompt_renders_backend_only_draft_flow():
     assert '"channels": ["xiaohongshu"]' in prompt
     assert "Do not send anything to PushPlus" in prompt
     assert "stop before tapping the final publish button" in prompt
+    assert "Write article" in prompt
     assert "Never expose PushPlus token, OpenAI key, or the relay secret" in prompt
 
 
@@ -68,6 +69,7 @@ def test_xhs_8h_prompt_uses_separate_scope_and_human_summary_direction():
     assert "Do not paste raw X links into the note body" in prompt
     assert "publish the note through the Xiaohongshu mobile app only" in prompt
     assert "Do not use the web publisher" in prompt
+    assert "Write article" in prompt
 
 
 def test_cloud_routine_prompt_only_collects_the_latest_hour():

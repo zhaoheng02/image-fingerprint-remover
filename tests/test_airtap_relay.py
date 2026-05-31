@@ -1067,6 +1067,8 @@ def test_airtap_xhs_confirmation_endpoint_creates_publish_task(tmp_path, monkeyp
     assert "Do not open X" in message
     assert "Use the Xiaohongshu mobile app only" in message
     assert "Do not use the web publisher" in message
+    assert "Write article" in message
+    assert "title, body, and hashtags as one combined text" in message
     assert "下周重点关注这几个财报" in message
     assert "relay-secret" not in message
 

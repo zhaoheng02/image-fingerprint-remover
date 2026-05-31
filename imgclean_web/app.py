@@ -1832,6 +1832,8 @@ def _airtap_xhs_publish_message(title: str, body: str, hashtags: list[str], *, p
         "The server already collected the hourly posts, deduped them, and generated this 8-hour summary.\n\n"
         "Use the Xiaohongshu mobile app only. Open the installed Xiaohongshu app on the Airtap phone and publish from inside the app. "
         "Do not use the web publisher, xiaohongshu.com, a browser, a desktop uploader, or third-party web publishing tooling for the final post.\n\n"
+        "The Xiaohongshu mobile editor may show a text note screen with a Write article option. "
+        "Prefer Write article for long copy. If the app does not expose stable separate title/body fields, paste the title, body, and hashtags as one combined text in the main editor field.\n\n"
         "Create a Xiaohongshu note in the mobile app with exactly this content:\n\n"
         f"Title:\n{title}\n\n"
         f"Body:\n{body}\n\n"
