@@ -169,6 +169,15 @@ Phone-side Airtap publishing contract:
 5. If `new_count` is greater than `0`, Airtap opens Xiaohongshu on the cloud phone, creates a note from `channels.xiaohongshu.title`, `body`, and `hashtags`, attaches the media URLs it collected when the app supports upload from the local files, and publishes through the app. This keeps Xiaohongshu traffic as normal phone interaction while keeping content generation server-side.
 6. Never put PushPlus tokens or OpenAI keys into Airtap prompts. The only Airtap-side secret should be `AIRTAP_RELAY_SECRET`, sent as the `x-airtap-secret` header or Bearer token when calling the backend.
 
+Generate the exact Airtap prompt from the local machine:
+
+```bash
+scripts/airtap_x_hourly_prompt.py --dry-run
+scripts/airtap_x_hourly_prompt.py
+```
+
+The script reads `AIRTAP_RELAY_SECRET` from the environment, or from `~/.codex/secrets/imgclean-airtap-relay-secret`. Use `--dry-run` to verify Xiaohongshu reaches the draft screen without tapping the final publish button. Omit `--dry-run` for the production Airtap routine. WeChat content is self-contained in the PushPlus HTML; do not ask Airtap to create extra WeChat links or call PushPlus.
+
 ## Watermark Removal
 
 `POST /api/clean` supports `mode=watermark`. It auto-detects likely visible text watermarks and inpaints the mask with OpenCV when available. For difficult images, callers can still provide either `watermark_box=x,y,w,h` or a `watermark_mask` file where white pixels mark the watermark area.

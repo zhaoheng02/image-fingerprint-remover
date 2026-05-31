@@ -110,6 +110,31 @@ def test_airtap_profiles_upsert_downloads_avatar_url(tmp_path, monkeypatch):
 
 def test_airtap_posts_render_enriches_profiles_without_marking_seen(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
+    image_bytes = base64.b64decode(_avatar_base64())
+
+    class FakeResponse:
+        content = image_bytes
+        headers = {"content-type": "image/png"}
+
+        def raise_for_status(self):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, timeout, follow_redirects=False):
+            self.timeout = timeout
+            self.follow_redirects = follow_redirects
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            assert url == "https://airtap.ai/content/live/android-files/chart.png"
+            return FakeResponse()
+
+    monkeypatch.setattr("imgclean_web.app.httpx.AsyncClient", FakeAsyncClient)
     client.post(
         "/api/airtap/profiles/upsert",
         headers={"x-airtap-secret": "relay-secret"},
@@ -163,8 +188,9 @@ def test_airtap_posts_render_enriches_profiles_without_marking_seen(tmp_path, mo
     assert "<table" not in rendered["channels"]["wechat"]["content"]
     assert "Airtap 自动抓取" in rendered["channels"]["wechat"]["content"]
     assert "原文链接（备用）" in rendered["channels"]["wechat"]["content"]
-    assert "<img src=\"https://airtap.ai/content/live/android-files/chart.png\"" in rendered["channels"]["wechat"]["content"]
-    assert "/api/airtap/avatars/" in rendered["channels"]["wechat"]["content"]
+    assert '<img src="data:image/jpeg;base64,' in rendered["channels"]["wechat"]["content"]
+    assert '<img src="https://airtap.ai/content/live/android-files/chart.png"' not in rendered["channels"]["wechat"]["content"]
+    assert "/api/airtap/avatars/" not in rendered["channels"]["wechat"]["content"]
     assert rendered["channels"]["xiaohongshu"]["format"] == "note"
     assert rendered["channels"]["xiaohongshu"]["title"] == "X 科技/美股快讯：1 条值得看"
     assert "核心内容：" in rendered["channels"]["xiaohongshu"]["body"]
@@ -300,14 +326,56 @@ def test_airtap_posts_render_uses_ai_composer_when_configured(tmp_path, monkeypa
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["channels"]["wechat"]["title"] == "AI标题"
-    assert payload["channels"]["wechat"]["content"] == "<table><tr><td>AI微信内容</td></tr></table>"
+    assert payload["channels"]["wechat"]["title"] == "X 每小时更新：1 条新内容"
+    assert "<table" not in payload["channels"]["wechat"]["content"]
     assert payload["channels"]["xiaohongshu"]["title"] == "AI小红书标题"
     assert payload["channels"]["xiaohongshu"]["body"] == "AI小红书正文"
     assert calls[0][0] == "https://api.xairouter.com/v1/responses"
     assert calls[0][1]["authorization"] == "Bearer openai-key"
     assert calls[0][2]["model"] == "gpt-5.5"
+    assert "需要生成的渠道：xiaohongshu" in calls[0][2]["input"]
     assert "NVDA keeps shipping." in calls[0][2]["input"]
+
+
+def test_airtap_posts_render_skips_ai_composer_for_wechat_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("IMGCLEAN_WEB_DATA_DIR", str(tmp_path / "web-data"))
+    monkeypatch.setenv("IMGCLEAN_AUTH_MODE", "none")
+    monkeypatch.setenv("IMGCLEAN_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("AIRTAP_RELAY_SECRET", "relay-secret")
+    monkeypatch.setenv("AIRTAP_AI_ENABLED", "true")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    calls = []
+
+    class FakeAsyncClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, headers, json):
+            calls.append((url, headers, json))
+            raise AssertionError("AI composer should not run for WeChat-only payloads")
+
+    monkeypatch.setattr("imgclean_web.app.httpx.AsyncClient", FakeAsyncClient)
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/airtap/posts/render",
+        headers={"x-airtap-secret": "relay-secret"},
+        json={
+            "scope": "x-ai-wechat-only",
+            "channels": ["wechat"],
+            "posts": [{"id": "tweet-ai-2", "author_name": "xiao mu", "text": "wechat only"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert "wechat only" in response.json()["channels"]["wechat"]["content"]
+    assert calls == []
 
 
 def test_airtap_posts_publish_pushes_wechat_content_with_pushplus(tmp_path, monkeypatch):

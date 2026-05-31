@@ -9,23 +9,30 @@ import hmac
 import base64
 import hashlib
 import inspect as pyinspect
+import io
 import json
 import logging
-from urllib.parse import quote, urlencode, urlparse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlencode, urlparse
 
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from PIL import Image, UnidentifiedImageError
 
 from imgclean.clean import VALID_MODES, clean_bytes
 from imgclean.detect import detect_format, inspect as inspect_file
 from imgclean.findings import InspectReport
+from .airtap_relay import (
+    LocalAirtapRelayStore,
+    SupabaseAirtapRelayStore,
+    render_wechat_pushplus,
+    render_xiaohongshu_note,
+)
 from .billing import BillingNotConfigured, StripeBilling, UnknownCreditPack
-from .airtap_relay import LocalAirtapRelayStore, SupabaseAirtapRelayStore
 from .identity import Authenticator, User
 from .ledger import InsufficientCredits, LocalLedger, SupabaseLedger
 from .session import create_session_token, read_session_token
@@ -44,6 +51,11 @@ WECHAT_USERINFO_URL = "https://api.weixin.qq.com/sns/userinfo"
 WECHAT_MINIPROGRAM_SESSION_URL = "https://api.weixin.qq.com/sns/jscode2session"
 AIRTAP_MAX_AVATAR_BYTES = 2 * 1024 * 1024
 AIRTAP_AVATAR_CONTENT_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
+AIRTAP_WECHAT_INLINE_SOURCE_MAX_BYTES = 6 * 1024 * 1024
+AIRTAP_WECHAT_INLINE_OUTPUT_MAX_BYTES = 28 * 1024
+AIRTAP_WECHAT_INLINE_TOTAL_MAX_CHARS = 48 * 1024
+AIRTAP_WECHAT_INLINE_MAX_EDGES = (480, 360, 280)
+AIRTAP_WECHAT_INLINE_CONTENT_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
 logger = logging.getLogger(__name__)
 
 
@@ -813,11 +825,25 @@ async def _render_airtap_payload(
     record_seen: bool,
 ) -> tuple[Any, dict[str, dict[str, Any]]]:
     rendered = app.state.airtap_relay.render_posts(payload, record_seen=record_seen)
-    channels = rendered.channels
+    await _inline_airtap_wechat_media(rendered.new_posts)
+    channels = _render_airtap_channels(payload, rendered.new_posts)
     ai_channels = await _maybe_compose_airtap_channels_with_ai(rendered.new_posts, payload, settings)
     if ai_channels:
         channels = {**channels, **ai_channels}
     return rendered, channels
+
+
+def _render_airtap_channels(payload: dict[str, Any], posts: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    requested_channels = payload.get("channels") or ["wechat", "xiaohongshu"]
+    channels = [str(channel) for channel in requested_channels if str(channel) in {"wechat", "xiaohongshu"}]
+    if not channels:
+        channels = ["wechat", "xiaohongshu"]
+    rendered = {}
+    if "wechat" in channels:
+        rendered["wechat"] = render_wechat_pushplus(posts)
+    if "xiaohongshu" in channels:
+        rendered["xiaohongshu"] = render_xiaohongshu_note(posts)
+    return rendered
 
 
 def _env_bool(value: str) -> bool:
@@ -903,6 +929,85 @@ async def _download_airtap_profile_avatars(profiles: list[Any]) -> list[dict[str
     return hydrated
 
 
+async def _inline_airtap_wechat_media(posts: list[dict[str, Any]]) -> None:
+    urls: list[str] = []
+    for post in posts:
+        avatar_url = str(post.get("avatar_url") or "").strip()
+        if avatar_url:
+            urls.append(avatar_url)
+        for url in post.get("image_urls") or []:
+            if url:
+                urls.append(str(url))
+    if not urls:
+        return
+
+    cache: dict[str, str] = {}
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        for url in dict.fromkeys(urls):
+            cache[url] = await _download_inline_image_data_uri(client, url)
+
+    remaining_chars = AIRTAP_WECHAT_INLINE_TOTAL_MAX_CHARS
+    for post in posts:
+        avatar_url = str(post.get("avatar_url") or "").strip()
+        avatar_data_uri = cache.get(avatar_url, "")
+        if avatar_data_uri and len(avatar_data_uri) <= remaining_chars:
+            post["avatar_data_uri"] = avatar_data_uri
+            remaining_chars -= len(avatar_data_uri)
+        image_data_uris = []
+        for url in post.get("image_urls") or []:
+            data_uri = cache.get(str(url))
+            if data_uri and len(data_uri) <= remaining_chars:
+                image_data_uris.append(data_uri)
+                remaining_chars -= len(data_uri)
+        if image_data_uris:
+            post["image_data_uris"] = image_data_uris
+
+
+async def _download_inline_image_data_uri(client: httpx.AsyncClient, url: str) -> str:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return ""
+    try:
+        response = await client.get(url)
+        response.raise_for_status()
+    except Exception as exc:
+        logger.warning("Airtap WeChat image inline download failed: url=%s error=%s", url, exc)
+        return ""
+    content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type not in AIRTAP_WECHAT_INLINE_CONTENT_TYPES:
+        return ""
+    content = response.content
+    if len(content) > AIRTAP_WECHAT_INLINE_SOURCE_MAX_BYTES:
+        logger.warning("Airtap WeChat image too large to inline: url=%s bytes=%s", url, len(content))
+        return ""
+    try:
+        return _image_bytes_to_jpeg_data_uri(content)
+    except (OSError, UnidentifiedImageError, ValueError) as exc:
+        logger.warning("Airtap WeChat image encode failed: url=%s error=%s", url, exc)
+        return ""
+
+
+def _image_bytes_to_jpeg_data_uri(content: bytes) -> str:
+    source = Image.open(io.BytesIO(content))
+    output = io.BytesIO()
+    for edge in AIRTAP_WECHAT_INLINE_MAX_EDGES:
+        image = source.copy()
+        image.thumbnail((edge, edge))
+        if image.mode in {"RGBA", "LA"}:
+            background = Image.new("RGB", image.size, (255, 255, 255))
+            background.paste(image, mask=image.getchannel("A"))
+            image = background
+        elif image.mode != "RGB":
+            image = image.convert("RGB")
+        for quality in (76, 66, 56, 46):
+            output.seek(0)
+            output.truncate(0)
+            image.save(output, format="JPEG", quality=quality, optimize=True)
+            if output.tell() <= AIRTAP_WECHAT_INLINE_OUTPUT_MAX_BYTES:
+                return "data:image/jpeg;base64," + base64.b64encode(output.getvalue()).decode("ascii")
+    raise ValueError("encoded image is too large")
+
+
 async def _maybe_compose_airtap_channels_with_ai(
     posts: list[dict[str, Any]],
     payload: dict[str, Any],
@@ -911,9 +1016,9 @@ async def _maybe_compose_airtap_channels_with_ai(
     if not settings.airtap_ai_enabled or not settings.openai_api_key or not posts:
         return {}
     requested_channels = payload.get("channels") or ["wechat", "xiaohongshu"]
-    channels = [str(channel) for channel in requested_channels if str(channel) in {"wechat", "xiaohongshu"}]
+    channels = [str(channel) for channel in requested_channels if str(channel) == "xiaohongshu"]
     if not channels:
-        channels = ["wechat", "xiaohongshu"]
+        return {}
     prompt = _airtap_ai_prompt(posts, channels)
     try:
         async with httpx.AsyncClient(timeout=90) as client:
@@ -981,9 +1086,8 @@ def _airtap_ai_prompt(posts: list[dict[str, Any]], channels: list[str]) -> str:
         "要求：\n"
         "1. 保留作者、发布时间、原文重点、引用关系、图片和视频链接，不要遗漏。\n"
         "2. 非中文内容要翻译成自然中文；重要英文原句可保留在括号内。\n"
-        "3. 微信渠道返回 pushplus HTML，使用 table 布局，头像在左、内容在右，排版紧凑清晰。\n"
-        "4. 小红书渠道返回适合作为笔记的标题、正文和标签，语气自然，不要营销腔。\n"
-        "5. 只输出 JSON，不要 Markdown。\n"
+        "3. 小红书渠道返回适合作为笔记的标题、正文和标签，语气自然，不要营销腔。\n"
+        "4. 只输出 JSON，不要 Markdown。\n"
         f"需要生成的渠道：{', '.join(channels)}。\n"
         "帖子 JSON：\n"
         f"{json.dumps(posts, ensure_ascii=False)}"

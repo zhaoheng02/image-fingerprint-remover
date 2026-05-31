@@ -370,7 +370,7 @@ def render_xiaohongshu_note(posts: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _wechat_post_row(post: dict[str, Any]) -> str:
-    avatar = html.escape(str(post.get("avatar_url") or ""))
+    avatar = html.escape(str(post.get("avatar_data_uri") or ""))
     avatar_cell = (
         f'<img src="{avatar}" alt="" style="display:block;width:42px;height:42px;border-radius:50%;object-fit:cover;border:1px solid #e5e7eb;">'
         if avatar
@@ -429,12 +429,22 @@ def _wechat_quote(post: dict[str, Any]) -> str:
 
 def _wechat_media(post: dict[str, Any]) -> str:
     lines = []
-    for url in post.get("image_urls") or []:
-        safe_url = html.escape(str(url))
+    image_data_uris = [str(value) for value in post.get("image_data_uris") or [] if value]
+    for data_uri in image_data_uris:
+        safe_url = html.escape(data_uri)
         lines.append(
             '<div style="margin-top:12px;">'
             f'<img src="{safe_url}" alt="图片" style="display:block;width:100%;height:auto;max-width:100%;'
             'border-radius:8px;border:1px solid #e5e7eb;background:#f8fafc;">'
+            "</div>"
+        )
+    for url in (post.get("image_urls") or [])[len(image_data_uris):]:
+        safe_url = html.escape(str(url))
+        lines.append(
+            '<div style="margin-top:6px;padding:8px 10px;background:#f8fafc;border-radius:8px;'
+            'border:1px solid #e2e8f0;word-break:break-all;overflow-wrap:anywhere;">'
+            f'<span style="font-weight:700;color:#0f172a;">图片素材</span>：'
+            f'<span style="color:#475569;">{safe_url}</span>'
             "</div>"
         )
     for label, urls in (("视频素材", post.get("video_urls") or []),):
