@@ -106,6 +106,10 @@ Recommended production setup: put HTTPS, request-size limits, rate limiting, and
 - `IMGCLEAN_AUTH_MODE=wechat` plus `WECHAT_APP_ID`, `WECHAT_APP_SECRET`, `IMGCLEAN_SESSION_SECRET`, and either `WECHAT_REDIRECT_URI` or `IMGCLEAN_API_BASE_URL` — enable WeChat QR OAuth login
 - `IMGCLEAN_AUTH_MODE=wechat_miniprogram` plus `WECHAT_MINIPROGRAM_APP_ID`, `WECHAT_MINIPROGRAM_APP_SECRET`, and `IMGCLEAN_SESSION_SECRET` — enable Mini Program `wx.login` authentication
 - `IMGCLEAN_CREDITS_ENABLED=false` — disable credit deduction for no-payment deployments
+- `AIRTAP_RELAY_SECRET` — shared secret for Airtap relay endpoints
+- `AIRTAP_STORAGE_BUCKET` — Supabase Storage bucket for Airtap avatar/state persistence; keep it separate from image-only upload buckets
+- `AIRTAP_AI_ENABLED=true`, `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `AIRTAP_AI_MODEL` — let the relay compose WeChat HTML and Xiaohongshu note copy with an AI model
+- `PUSHPLUS_TOKEN`, optional `PUSHPLUS_TOPIC`, and `PUSHPLUS_ENDPOINT` — let `/api/airtap/posts/publish` push WeChat content through PushPlus
 
 ## What it detects
 

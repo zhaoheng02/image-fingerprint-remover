@@ -6,8 +6,11 @@ import re
 import time
 import uuid
 import hmac
+import base64
 import hashlib
 import inspect as pyinspect
+import json
+import logging
 from urllib.parse import quote, urlencode, urlparse
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +25,7 @@ from imgclean.clean import VALID_MODES, clean_bytes
 from imgclean.detect import detect_format, inspect as inspect_file
 from imgclean.findings import InspectReport
 from .billing import BillingNotConfigured, StripeBilling, UnknownCreditPack
+from .airtap_relay import LocalAirtapRelayStore, SupabaseAirtapRelayStore
 from .identity import Authenticator, User
 from .ledger import InsufficientCredits, LocalLedger, SupabaseLedger
 from .session import create_session_token, read_session_token
@@ -38,6 +42,9 @@ WECHAT_AUTH_URL = "https://open.weixin.qq.com/connect/qrconnect"
 WECHAT_TOKEN_URL = "https://api.weixin.qq.com/sns/oauth2/access_token"
 WECHAT_USERINFO_URL = "https://api.weixin.qq.com/sns/userinfo"
 WECHAT_MINIPROGRAM_SESSION_URL = "https://api.weixin.qq.com/sns/jscode2session"
+AIRTAP_MAX_AVATAR_BYTES = 2 * 1024 * 1024
+AIRTAP_AVATAR_CONTENT_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -53,6 +60,7 @@ class WebSettings:
     supabase_url: str
     supabase_secret_key: str
     supabase_storage_bucket: str
+    airtap_storage_bucket: str
     r2_endpoint_url: str
     r2_access_key_id: str
     r2_secret_access_key: str
@@ -73,6 +81,14 @@ class WebSettings:
     wechat_redirect_uri: str
     wechat_miniprogram_app_id: str
     wechat_miniprogram_app_secret: str
+    airtap_relay_secret: str
+    airtap_ai_enabled: bool
+    openai_api_key: str
+    openai_base_url: str
+    airtap_ai_model: str
+    pushplus_token: str
+    pushplus_topic: str
+    pushplus_endpoint: str
 
     @classmethod
     def from_env(cls) -> "WebSettings":
@@ -99,6 +115,7 @@ class WebSettings:
             supabase_url=os.environ.get("SUPABASE_URL", ""),
             supabase_secret_key=os.environ.get("SUPABASE_SECRET_KEY", ""),
             supabase_storage_bucket=os.environ.get("SUPABASE_STORAGE_BUCKET", "imgclean-files"),
+            airtap_storage_bucket=os.environ.get("AIRTAP_STORAGE_BUCKET", "imgclean-airtap"),
             r2_endpoint_url=os.environ.get("R2_ENDPOINT_URL", ""),
             r2_access_key_id=os.environ.get("R2_ACCESS_KEY_ID", ""),
             r2_secret_access_key=os.environ.get("R2_SECRET_ACCESS_KEY", ""),
@@ -122,6 +139,14 @@ class WebSettings:
             wechat_redirect_uri=os.environ.get("WECHAT_REDIRECT_URI", ""),
             wechat_miniprogram_app_id=os.environ.get("WECHAT_MINIPROGRAM_APP_ID", ""),
             wechat_miniprogram_app_secret=os.environ.get("WECHAT_MINIPROGRAM_APP_SECRET", ""),
+            airtap_relay_secret=os.environ.get("AIRTAP_RELAY_SECRET", ""),
+            airtap_ai_enabled=_env_bool(os.environ.get("AIRTAP_AI_ENABLED", "false")),
+            openai_api_key=os.environ.get("OPENAI_API_KEY", ""),
+            openai_base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com"),
+            airtap_ai_model=os.environ.get("AIRTAP_AI_MODEL", os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")),
+            pushplus_token=os.environ.get("PUSHPLUS_TOKEN", ""),
+            pushplus_topic=os.environ.get("PUSHPLUS_TOPIC", ""),
+            pushplus_endpoint=os.environ.get("PUSHPLUS_ENDPOINT", "https://www.pushplus.plus/send"),
         )
 
 
@@ -135,7 +160,7 @@ def create_app() -> FastAPI:
         allow_origins=list(settings.cors_origins),
         allow_origin_regex=settings.cors_origin_regex or None,
         allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["authorization", "content-type"],
+        allow_headers=["authorization", "content-type", "x-airtap-secret"],
         allow_credentials=True,
     )
     app.state.settings = settings
@@ -148,6 +173,7 @@ def create_app() -> FastAPI:
     app.state.ledger = _build_ledger(settings)
     app.state.storage = _build_storage(settings)
     app.state.billing = _build_billing(settings)
+    app.state.airtap_relay = _build_airtap_relay_store(settings)
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
@@ -301,6 +327,65 @@ def create_app() -> FastAPI:
             finally:
                 await upload.close()
         return {"mode": mode, "results": results}
+
+    @app.post("/api/airtap/profiles/upsert")
+    async def airtap_profiles_upsert(request: Request) -> dict[str, Any]:
+        _require_airtap_relay_secret(request, settings)
+        payload = await request.json()
+        profiles = payload.get("profiles")
+        if not isinstance(profiles, list):
+            raise HTTPException(status_code=400, detail="profiles must be a list.")
+        try:
+            hydrated_profiles = await _download_airtap_profile_avatars(profiles)
+            stored_profiles = app.state.airtap_relay.upsert_profiles(hydrated_profiles)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"ok": True, "profiles": stored_profiles}
+
+    @app.get("/api/airtap/profiles/lookup")
+    def airtap_profiles_lookup(request: Request, name: str) -> dict[str, Any]:
+        _require_airtap_relay_secret(request, settings)
+        profile = app.state.airtap_relay.lookup_profile(name)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="Profile not found.")
+        return {"ok": True, "profile": profile}
+
+    @app.get("/api/airtap/avatars/{filename}")
+    def airtap_avatar(filename: str) -> FileResponse:
+        path = app.state.airtap_relay.avatar_path(filename)
+        if not path.exists() or not path.is_file():
+            raise HTTPException(status_code=404, detail="Avatar not found.")
+        suffix = path.suffix.lower()
+        media_type = "image/jpeg" if suffix in {".jpg", ".jpeg"} else "image/webp" if suffix == ".webp" else "image/png"
+        return FileResponse(path, media_type=media_type)
+
+    @app.post("/api/airtap/posts/render")
+    async def airtap_posts_render(request: Request) -> dict[str, Any]:
+        _require_airtap_relay_secret(request, settings)
+        payload = await request.json()
+        rendered, channels = await _render_airtap_payload(app, payload, settings, record_seen=False)
+        return {
+            "ok": True,
+            "new_count": len(rendered.new_posts),
+            "duplicate_count": rendered.duplicate_count,
+            "posts": rendered.new_posts,
+            "channels": channels,
+        }
+
+    @app.post("/api/airtap/posts/publish")
+    async def airtap_posts_publish(request: Request) -> dict[str, Any]:
+        _require_airtap_relay_secret(request, settings)
+        payload = await request.json()
+        rendered, channels = await _render_airtap_payload(app, payload, settings, record_seen=True)
+        pushes = await _publish_airtap_channels(rendered.new_posts, channels, settings)
+        return {
+            "ok": True,
+            "new_count": len(rendered.new_posts),
+            "duplicate_count": rendered.duplicate_count,
+            "posts": rendered.new_posts,
+            "channels": channels,
+            "pushes": pushes,
+        }
 
     @app.get("/api/auth/wechat/login")
     def wechat_login(request: Request, return_to: str = "") -> RedirectResponse:
@@ -707,8 +792,47 @@ def _build_billing(settings: WebSettings) -> StripeBilling:
     )
 
 
+def _build_airtap_relay_store(settings: WebSettings) -> Any:
+    if settings.storage_backend == "supabase" and settings.supabase_url and settings.supabase_secret_key:
+        return SupabaseAirtapRelayStore(
+            settings.data_dir,
+            settings.supabase_url,
+            settings.supabase_secret_key,
+            settings.airtap_storage_bucket,
+            settings.ttl_seconds,
+            settings.api_base_url,
+        )
+    return LocalAirtapRelayStore(settings.data_dir, settings.api_base_url)
+
+
+async def _render_airtap_payload(
+    app: FastAPI,
+    payload: dict[str, Any],
+    settings: WebSettings,
+    *,
+    record_seen: bool,
+) -> tuple[Any, dict[str, dict[str, Any]]]:
+    rendered = app.state.airtap_relay.render_posts(payload, record_seen=record_seen)
+    channels = rendered.channels
+    ai_channels = await _maybe_compose_airtap_channels_with_ai(rendered.new_posts, payload, settings)
+    if ai_channels:
+        channels = {**channels, **ai_channels}
+    return rendered, channels
+
+
 def _env_bool(value: str) -> bool:
     return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _require_airtap_relay_secret(request: Request, settings: WebSettings) -> None:
+    if not settings.airtap_relay_secret:
+        raise HTTPException(status_code=503, detail="Airtap relay secret is not configured.")
+    supplied = request.headers.get("x-airtap-secret", "")
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        supplied = auth_header.split(" ", 1)[1].strip()
+    if not hmac.compare_digest(supplied, settings.airtap_relay_secret):
+        raise HTTPException(status_code=401, detail="Invalid Airtap relay secret.")
 
 
 def _safe_return_to(return_to: str, app_base_url: str) -> str:
@@ -745,6 +869,206 @@ async def _maybe_await(value: Any) -> Any:
     if pyinspect.isawaitable(value):
         return await value
     return value
+
+
+async def _download_airtap_profile_avatars(profiles: list[Any]) -> list[dict[str, Any]]:
+    hydrated: list[dict[str, Any]] = []
+    async with httpx.AsyncClient(timeout=30) as client:
+        for raw_profile in profiles:
+            if not isinstance(raw_profile, dict):
+                hydrated.append({})
+                continue
+            profile = dict(raw_profile)
+            avatar_url = str(profile.get("avatar_url") or "").strip()
+            if profile.get("avatar_base64") or not avatar_url:
+                hydrated.append(profile)
+                continue
+            parsed = urlparse(avatar_url)
+            if parsed.scheme not in {"http", "https"}:
+                hydrated.append(profile)
+                continue
+            try:
+                response = await client.get(avatar_url)
+                response.raise_for_status()
+            except (httpx.HTTPError, RuntimeError):
+                hydrated.append(profile)
+                continue
+            content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            if content_type not in AIRTAP_AVATAR_CONTENT_TYPES or len(response.content) > AIRTAP_MAX_AVATAR_BYTES:
+                hydrated.append(profile)
+                continue
+            profile["avatar_base64"] = base64.b64encode(response.content).decode("ascii")
+            profile["avatar_content_type"] = content_type
+            hydrated.append(profile)
+    return hydrated
+
+
+async def _maybe_compose_airtap_channels_with_ai(
+    posts: list[dict[str, Any]],
+    payload: dict[str, Any],
+    settings: WebSettings,
+) -> dict[str, dict[str, Any]]:
+    if not settings.airtap_ai_enabled or not settings.openai_api_key or not posts:
+        return {}
+    requested_channels = payload.get("channels") or ["wechat", "xiaohongshu"]
+    channels = [str(channel) for channel in requested_channels if str(channel) in {"wechat", "xiaohongshu"}]
+    if not channels:
+        channels = ["wechat", "xiaohongshu"]
+    prompt = _airtap_ai_prompt(posts, channels)
+    try:
+        async with httpx.AsyncClient(timeout=90) as client:
+            response = await client.post(
+                f"{settings.openai_base_url.rstrip('/')}/v1/responses",
+                headers={
+                    "authorization": f"Bearer {settings.openai_api_key}",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": settings.airtap_ai_model,
+                    "input": prompt,
+                    "text": {
+                        "format": {
+                            "type": "json_schema",
+                            "name": "airtap_channel_content",
+                            "schema": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "wechat": {
+                                        "type": "object",
+                                        "additionalProperties": False,
+                                        "properties": {
+                                            "target": {"type": "string"},
+                                            "template": {"type": "string"},
+                                            "title": {"type": "string"},
+                                            "content": {"type": "string"},
+                                        },
+                                        "required": ["target", "template", "title", "content"],
+                                    },
+                                    "xiaohongshu": {
+                                        "type": "object",
+                                        "additionalProperties": False,
+                                        "properties": {
+                                            "format": {"type": "string"},
+                                            "title": {"type": "string"},
+                                            "body": {"type": "string"},
+                                            "hashtags": {"type": "array", "items": {"type": "string"}},
+                                        },
+                                        "required": ["format", "title", "body", "hashtags"],
+                                    },
+                                },
+                            },
+                        }
+                    },
+                },
+            )
+            response.raise_for_status()
+    except Exception as exc:
+        logger.warning("Airtap AI channel composition failed: %s", exc)
+        return {}
+    try:
+        content = _extract_responses_text(response.json())
+        parsed = json.loads(content)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning("Airtap AI channel composition returned invalid JSON: %s", exc)
+        return {}
+    return _normalize_ai_channels(parsed, channels)
+
+
+def _airtap_ai_prompt(posts: list[dict[str, Any]], channels: list[str]) -> str:
+    return (
+        "你是社交媒体内容编辑。Airtap 已经抓取原始帖子，你负责把内容处理成可直接发布或推送的成品。\n"
+        "要求：\n"
+        "1. 保留作者、发布时间、原文重点、引用关系、图片和视频链接，不要遗漏。\n"
+        "2. 非中文内容要翻译成自然中文；重要英文原句可保留在括号内。\n"
+        "3. 微信渠道返回 pushplus HTML，使用 table 布局，头像在左、内容在右，排版紧凑清晰。\n"
+        "4. 小红书渠道返回适合作为笔记的标题、正文和标签，语气自然，不要营销腔。\n"
+        "5. 只输出 JSON，不要 Markdown。\n"
+        f"需要生成的渠道：{', '.join(channels)}。\n"
+        "帖子 JSON：\n"
+        f"{json.dumps(posts, ensure_ascii=False)}"
+    )
+
+
+def _extract_responses_text(payload: dict[str, Any]) -> str:
+    if isinstance(payload.get("output_text"), str):
+        return payload["output_text"]
+    for item in payload.get("output") or []:
+        for content in item.get("content") or []:
+            text = content.get("text")
+            if isinstance(text, str) and text.strip():
+                return text
+    return ""
+
+
+def _normalize_ai_channels(payload: dict[str, Any], channels: list[str]) -> dict[str, dict[str, Any]]:
+    normalized: dict[str, dict[str, Any]] = {}
+    if "wechat" in channels and isinstance(payload.get("wechat"), dict):
+        wechat = payload["wechat"]
+        normalized["wechat"] = {
+            "target": str(wechat.get("target") or "pushplus"),
+            "template": str(wechat.get("template") or "html"),
+            "title": str(wechat.get("title") or "X 每小时更新"),
+            "content": str(wechat.get("content") or ""),
+        }
+    if "xiaohongshu" in channels and isinstance(payload.get("xiaohongshu"), dict):
+        xhs = payload["xiaohongshu"]
+        hashtags = xhs.get("hashtags")
+        normalized["xiaohongshu"] = {
+            "format": str(xhs.get("format") or "note"),
+            "title": str(xhs.get("title") or "X 每小时更新"),
+            "body": str(xhs.get("body") or ""),
+            "hashtags": [str(tag) for tag in hashtags] if isinstance(hashtags, list) else [],
+        }
+    return {key: value for key, value in normalized.items() if value}
+
+
+async def _publish_airtap_channels(
+    new_posts: list[dict[str, Any]],
+    channels: dict[str, dict[str, Any]],
+    settings: WebSettings,
+) -> dict[str, dict[str, Any]]:
+    pushes: dict[str, dict[str, Any]] = {}
+    if "wechat" not in channels:
+        return pushes
+    if not new_posts:
+        pushes["wechat"] = {"ok": False, "provider": "pushplus", "reason": "no_new_posts"}
+        return pushes
+    if not settings.pushplus_token:
+        pushes["wechat"] = {"ok": False, "provider": "pushplus", "reason": "pushplus_token_not_configured"}
+        return pushes
+    pushes["wechat"] = await _send_pushplus(channels["wechat"], settings)
+    return pushes
+
+
+async def _send_pushplus(channel: dict[str, Any], settings: WebSettings) -> dict[str, Any]:
+    payload = {
+        "token": settings.pushplus_token,
+        "title": str(channel.get("title") or "X 每小时更新"),
+        "content": str(channel.get("content") or ""),
+        "template": str(channel.get("template") or "html"),
+    }
+    if settings.pushplus_topic:
+        payload["topic"] = settings.pushplus_topic
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                settings.pushplus_endpoint,
+                headers={"content-type": "application/json"},
+                json=payload,
+            )
+            response.raise_for_status()
+            body = response.json()
+    except Exception as exc:
+        return {"ok": False, "provider": "pushplus", "reason": "pushplus_request_failed", "message": str(exc)}
+    code = body.get("code")
+    return {
+        "ok": code in {200, "200"},
+        "provider": "pushplus",
+        "code": code,
+        "message": body.get("msg") or body.get("message") or "",
+        "provider_message_id": body.get("data"),
+    }
 
 
 def _verify_stripe_signature(body: bytes, signature_header: str, secret: str, tolerance_seconds: int = 300) -> None:

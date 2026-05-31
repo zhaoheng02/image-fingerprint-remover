@@ -44,6 +44,9 @@ Required secrets:
 - `imgclean-stripe-webhook-secret` -> `STRIPE_WEBHOOK_SECRET`
 - `imgclean-lemonsqueezy-webhook-secret` -> `LEMONSQUEEZY_WEBHOOK_SECRET`
 - `imgclean-session-secret` -> `IMGCLEAN_SESSION_SECRET`
+- `imgclean-airtap-relay-secret` -> `AIRTAP_RELAY_SECRET`
+- `imgclean-openai-api-key` -> `OPENAI_API_KEY`
+- `imgclean-pushplus-token` -> `PUSHPLUS_TOKEN`
 - `imgclean-wechat-app-id` -> `WECHAT_APP_ID`
 - `imgclean-wechat-app-secret` -> `WECHAT_APP_SECRET`
 - `imgclean-wechat-miniprogram-app-id` -> `WECHAT_MINIPROGRAM_APP_ID`
@@ -90,6 +93,81 @@ IMGCLEAN_SESSION_SECRET=<random secret>
 If the Mini Program AppID/AppSecret is not ready yet, keep `IMGCLEAN_AUTH_MODE=none`; the mini program can still upload anonymously, but the login button will show that Mini Program login is not configured.
 
 In the Mini Program admin console, add `https://imgclean-api.vercel.app` to the request, uploadFile, and downloadFile legal domains; WeChat documents these network domain requirements at `https://developers.weixin.qq.com/miniprogram/dev/framework/ability/network.html`. The client proxies cross-origin cleaned file downloads through `/api/download`, so the mini program only needs to whitelist the API domain.
+
+## Airtap Relay
+
+Airtap should stay focused on phone/browser automation: open X, collect the raw post fields, and call the backend before pushing. The backend stores avatar mappings, deduplicates posts by `scope`, and returns channel-ready content.
+
+Configure the API:
+
+```bash
+AIRTAP_RELAY_SECRET=<random shared secret>
+AIRTAP_AI_ENABLED=true
+OPENAI_BASE_URL=https://api.xairouter.com
+OPENAI_API_KEY=<router or OpenAI key>
+AIRTAP_AI_MODEL=gpt-5.5
+AIRTAP_STORAGE_BUCKET=imgclean-airtap
+PUSHPLUS_TOKEN=<pushplus token>
+PUSHPLUS_ENDPOINT=https://www.pushplus.plus/send
+PUSHPLUS_TOPIC=<optional topic>
+```
+
+Use `AIRTAP_AI_ENABLED=false` to keep deterministic rendering only. With Supabase storage enabled, avatar files and `airtap/state.json` are persisted in `AIRTAP_STORAGE_BUCKET` so the relay can store JSON state separately from image-only upload buckets; local mode stores them under `IMGCLEAN_WEB_DATA_DIR/airtap`. PushPlus documents `POST https://www.pushplus.plus/send` with JSON fields `token`, `title`, `content`, `topic`, and `template`; this relay uses `template=html` for WeChat pushes.
+
+Upsert profile/avatar mappings:
+
+```bash
+curl -X POST https://imgclean-api.vercel.app/api/airtap/profiles/upsert \
+  -H "content-type: application/json" \
+  -H "x-airtap-secret: $AIRTAP_RELAY_SECRET" \
+  -d '{
+    "profiles": [
+      {
+        "display_name": "xiao mu",
+        "handle": "xiaomustock",
+        "avatar_url": "https://airtap.ai/content/live/android-files/avatar.png"
+      }
+    ]
+  }'
+```
+
+Publish hourly posts. The backend renders channel content and pushes WeChat through PushPlus only when there are new posts:
+
+```bash
+curl -X POST https://imgclean-api.vercel.app/api/airtap/posts/publish \
+  -H "content-type: application/json" \
+  -H "x-airtap-secret: $AIRTAP_RELAY_SECRET" \
+  -d '{
+    "scope": "x-hourly-watch",
+    "channels": ["wechat", "xiaohongshu"],
+    "posts": [
+      {
+        "id": "tweet-id-or-url",
+        "author_name": "xiao mu",
+        "author_handle": "xiaomustock",
+        "published_at": "4分钟前",
+        "text": "raw post text",
+        "url": "https://x.com/xiaomustock/status/...",
+        "quote": {"author_name": "quoted author", "text": "quoted text"},
+        "image_urls": ["https://airtap.ai/content/live/android-files/image.png"],
+        "video_urls": ["https://airtap.ai/content/live/android-files/video.mp4"]
+      }
+    ]
+  }'
+```
+
+The response contains `channels.wechat.title`, `channels.wechat.content`, `pushes.wechat`, and `channels.xiaohongshu.title/body/hashtags`. Re-posting the same `id` or `url` under the same `scope` returns `duplicate_count`, omits old content, and skips PushPlus with `reason=no_new_posts`.
+
+`POST /api/airtap/posts/render` remains available for dry runs; it returns channel-ready content without pushing or marking posts as sent. Only `/api/airtap/posts/publish` records the dedupe state.
+
+Phone-side Airtap publishing contract:
+
+1. Airtap scrapes X only for raw fields: author display name, handle, avatar URL, published time, text, quote, original URL, image URLs, and video URLs.
+2. Airtap calls `/api/airtap/profiles/upsert` whenever it sees a new or refreshed avatar. Do not ask Airtap to maintain the long-term avatar map locally.
+3. Airtap calls `/api/airtap/posts/publish` with `channels=["wechat","xiaohongshu"]`. WeChat delivery is handled by the backend through PushPlus; Airtap must not call PushPlus directly.
+4. If `new_count` is `0`, Airtap stops and posts nothing.
+5. If `new_count` is greater than `0`, Airtap opens Xiaohongshu on the cloud phone, creates a note from `channels.xiaohongshu.title`, `body`, and `hashtags`, attaches the media URLs it collected when the app supports upload from the local files, and publishes through the app. This keeps Xiaohongshu traffic as normal phone interaction while keeping content generation server-side.
+6. Never put PushPlus tokens or OpenAI keys into Airtap prompts. The only Airtap-side secret should be `AIRTAP_RELAY_SECRET`, sent as the `x-airtap-secret` header or Bearer token when calling the backend.
 
 ## Watermark Removal
 

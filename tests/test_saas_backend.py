@@ -279,6 +279,23 @@ def test_cors_allows_vercel_frontend(tmp_path, monkeypatch):
     assert response.headers["access-control-allow-origin"] == "https://frontend-green-one-33.vercel.app"
 
 
+def test_cors_allows_airtap_secret_header(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+
+    response = client.options(
+        "/api/airtap/posts/render",
+        headers={
+            "origin": "https://frontend-green-one-33.vercel.app",
+            "access-control-request-method": "POST",
+            "access-control-request-headers": "x-airtap-secret,content-type",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "https://frontend-green-one-33.vercel.app"
+    assert "x-airtap-secret" in response.headers["access-control-allow-headers"]
+
+
 def test_download_proxy_rejects_untrusted_hosts(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
 

@@ -50,6 +50,18 @@ spec:
               value: https://replace-with-api-url/api/auth/wechat/callback
             - name: SUPABASE_URL
               value: https://avqgeqslhywrulnzjgzo.supabase.co
+            - name: AIRTAP_STORAGE_BUCKET
+              value: imgclean-airtap
+            - name: AIRTAP_AI_ENABLED
+              value: "true"
+            - name: OPENAI_BASE_URL
+              value: https://api.xairouter.com
+            - name: AIRTAP_AI_MODEL
+              value: gpt-5.5
+            - name: PUSHPLUS_ENDPOINT
+              value: https://www.pushplus.plus/send
+            - name: PUSHPLUS_TOPIC
+              value: ""
             - name: R2_ENDPOINT_URL
               value: https://replace-account-id.r2.cloudflarestorage.com
             - name: R2_BUCKET
@@ -64,6 +76,21 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: imgclean-supabase-secret-key
+                  key: latest
+            - name: AIRTAP_RELAY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: imgclean-airtap-relay-secret
+                  key: latest
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: imgclean-openai-api-key
+                  key: latest
+            - name: PUSHPLUS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: imgclean-pushplus-token
                   key: latest
             - name: R2_ACCESS_KEY_ID
               valueFrom:
