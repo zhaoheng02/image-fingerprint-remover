@@ -119,10 +119,12 @@ def test_airtap_profiles_upsert_downloads_avatar_url(tmp_path, monkeypatch):
 def test_airtap_posts_render_enriches_profiles_without_marking_seen(tmp_path, monkeypatch):
     client = _client(tmp_path, monkeypatch)
     image_bytes = base64.b64decode(_avatar_base64())
+    video_bytes = b"\x00\x00\x00\x18ftypmp42" + (b"0" * 128)
 
     class FakeResponse:
-        content = image_bytes
-        headers = {"content-type": "image/png"}
+        def __init__(self, content=image_bytes, content_type="image/png"):
+            self.content = content
+            self.headers = {"content-type": content_type}
 
         def raise_for_status(self):
             return None
@@ -139,8 +141,11 @@ def test_airtap_posts_render_enriches_profiles_without_marking_seen(tmp_path, mo
             return False
 
         async def get(self, url):
-            assert url == "https://airtap.ai/content/live/android-files/chart.png"
-            return FakeResponse()
+            if url == "https://airtap.ai/content/live/android-files/chart.png":
+                return FakeResponse(image_bytes, "image/png")
+            if url == "https://airtap.ai/content/live/android-files/clip.mp4":
+                return FakeResponse(video_bytes, "video/mp4")
+            raise AssertionError(url)
 
     monkeypatch.setattr("imgclean_web.app.httpx.AsyncClient", FakeAsyncClient)
     client.post(
@@ -204,7 +209,7 @@ def test_airtap_posts_render_enriches_profiles_without_marking_seen(tmp_path, mo
     assert '<img src="/api/airtap/media/' in rendered["channels"]["wechat"]["content"]
     assert '<img src="https://airtap.ai/content/live/android-files/chart.png"' not in rendered["channels"]["wechat"]["content"]
     assert "视频预览" in rendered["channels"]["wechat"]["content"]
-    assert "<video" in rendered["channels"]["wechat"]["content"]
+    assert '<video src="/api/airtap/media/wechat-video-' in rendered["channels"]["wechat"]["content"]
     assert "https://airtap.ai/content/live/android-files/clip.mp4" in rendered["channels"]["wechat"]["content"]
     assert "/api/airtap/avatars/" not in rendered["channels"]["wechat"]["content"]
     assert rendered["channels"]["xiaohongshu"]["format"] == "note"
@@ -330,7 +335,80 @@ def test_wechat_digest_enriches_quote_from_stored_history_and_profile(tmp_path, 
     assert "海力士韩国开盘爆拉5%" in content
 
 
+def test_airtap_posts_normalizes_variant_quote_and_media_fields(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/airtap/posts/render",
+        headers={"x-airtap-secret": "relay-secret"},
+        json={
+            "scope": "variant-schema-preview",
+            "channels": ["wechat"],
+            "posts": [
+                {
+                    "tweet_id": "2061107214434365562",
+                    "display_name": "RamenPanda",
+                    "username": "@IamRamenPanda",
+                    "created_at": "2026-05-31T15:27:00Z",
+                    "full_text": "按照 UBS 的中周期盈利预测：18PE 对应约 2800 美元。",
+                    "quoted_post": {
+                        "status_id": "2061082495332794506",
+                        "display_name": "川沐｜Trumoo",
+                        "username": "xiaomustock",
+                        "full_text": "HODL，$DRAM 坚持。",
+                        "media": [{"media_url_https": "https://pbs.twimg.com/media/HJpvlt6XUAIesk5.jpg"}],
+                    },
+                    "media": [{"video_url": "https://video.twimg.com/ext_tw_video/clip.mp4"}],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    post = response.json()["posts"][0]
+    assert post["url"] == "https://x.com/IamRamenPanda/status/2061107214434365562"
+    assert post["quote"]["url"] == "https://x.com/xiaomustock/status/2061082495332794506"
+    assert post["quote"]["image_urls"] == ["https://pbs.twimg.com/media/HJpvlt6XUAIesk5.jpg"]
+    assert post["video_urls"] == ["https://video.twimg.com/ext_tw_video/clip.mp4"]
+    content = response.json()["channels"]["wechat"]["content"]
+    assert "引用" in content
+    assert "HODL" in content
+
+
+def test_airtap_posts_normalizes_flat_quote_fields(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/airtap/posts/render",
+        headers={"x-airtap-secret": "relay-secret"},
+        json={
+            "scope": "flat-quote-preview",
+            "channels": ["wechat"],
+            "posts": [
+                {
+                    "id": "2061107872709447996",
+                    "author_handle": "IamRamenPanda",
+                    "text": "一个个写小作文大吹币圈美股。",
+                    "quote_id": "2061046337253335198",
+                    "quote_author_name": "J$",
+                    "quote_author_handle": "diamondhandjs",
+                    "quote_text": "不担心 CRS 的人只有三类。",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    post = response.json()["posts"][0]
+    assert post["url"] == "https://x.com/IamRamenPanda/status/2061107872709447996"
+    assert post["quote"]["url"] == "https://x.com/diamondhandjs/status/2061046337253335198"
+    content = response.json()["channels"]["wechat"]["content"]
+    assert "J$" in content
+    assert "不担心 CRS 的人只有三类" in content
+
+
 def test_wechat_digest_renders_youtube_preview_card(tmp_path, monkeypatch):
+    monkeypatch.setenv("AIRTAP_WECHAT_VIDEO_DOWNLOAD_ENABLED", "false")
     client = _client(tmp_path, monkeypatch)
 
     response = client.post(
@@ -355,6 +433,117 @@ def test_wechat_digest_renders_youtube_preview_card(tmp_path, monkeypatch):
     assert "YouTube 视频" in content
     assert "i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg" in content
     assert "https://www.youtube.com/watch?v=dQw4w9WgXcQ" in content
+
+
+def test_wechat_digest_hosts_downloaded_youtube_video_when_available(tmp_path, monkeypatch):
+    image_bytes = base64.b64decode(_avatar_base64())
+    video_bytes = b"\x00\x00\x00\x18ftypmp42" + (b"1" * 256)
+
+    class FakeImageResponse:
+        content = image_bytes
+        headers = {"content-type": "image/png"}
+
+        def raise_for_status(self):
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, timeout, follow_redirects=False):
+            self.timeout = timeout
+            self.follow_redirects = follow_redirects
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def get(self, url):
+            assert url == "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg"
+            return FakeImageResponse()
+
+    async def fake_download_youtube(url, settings):
+        assert url == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        return {"content": video_bytes, "content_type": "video/mp4", "source": "youtube"}
+
+    monkeypatch.setattr("imgclean_web.app.httpx.AsyncClient", FakeAsyncClient)
+    monkeypatch.setattr("imgclean_web.app._download_youtube_video", fake_download_youtube)
+    client = _client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/airtap/posts/render",
+        headers={"x-airtap-secret": "relay-secret"},
+        json={
+            "scope": "youtube-video-preview",
+            "channels": ["wechat"],
+            "posts": [
+                {
+                    "id": "tweet-youtube-video-1",
+                    "author_handle": "xiaomustock",
+                    "text": "这条引用了一个 YouTube 访谈",
+                    "link_cards": [
+                        {
+                            "provider": "youtube",
+                            "title": "AI infrastructure interview",
+                            "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                            "thumbnail_url": "https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg",
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    content = response.json()["channels"]["wechat"]["content"]
+    assert '<video src="/api/airtap/media/wechat-video-' in content
+    assert "打开原视频" in content
+    assert '<img src="/api/airtap/media/wechat-youtube-' in content
+
+
+def test_airtap_debug_recent_reports_hourly_post_shapes(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+
+    publish = client.post(
+        "/api/airtap/posts/publish",
+        headers={"x-airtap-secret": "relay-secret"},
+        json={
+            "scope": "x-hourly-wechat",
+            "channels": ["xiaohongshu"],
+            "posts": [
+                {
+                    "id": "tweet-debug-shape-1",
+                    "author_name": "川沐｜Trumoo",
+                    "author_handle": "xiaomustock",
+                    "text": "HODL，DRAM 坚持。",
+                    "url": "https://x.com/xiaomustock/status/1",
+                    "image_urls": ["https://airtap.ai/content/live/android-files/chart.png"],
+                    "video_urls": ["https://airtap.ai/content/live/android-files/clip.mp4"],
+                    "quote": {
+                        "author_handle": "xiaomustock",
+                        "text": "历史引用内容。",
+                        "image_urls": ["https://airtap.ai/content/live/android-files/quote.png"],
+                    },
+                }
+            ],
+        },
+    )
+    assert publish.status_code == 200
+
+    response = client.get(
+        "/api/airtap/debug/recent",
+        headers={"x-airtap-secret": "relay-secret"},
+        params={"scope": "x-hourly-wechat", "hours": 1, "limit": 5},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] == 1
+    shape = payload["posts"][0]
+    assert shape["has_quote"] is True
+    assert shape["quote_text_present"] is True
+    assert shape["image_count"] == 1
+    assert shape["video_count"] == 1
+    assert shape["quote_image_count"] == 1
 
 
 def test_airtap_posts_infer_author_from_source_handle(tmp_path, monkeypatch):

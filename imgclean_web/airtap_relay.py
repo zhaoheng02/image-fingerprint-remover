@@ -25,6 +25,13 @@ AVATAR_CONTENT_TYPES = {
     "image/png": ".png",
     "image/webp": ".webp",
 }
+MEDIA_CONTENT_TYPES = {
+    **AVATAR_CONTENT_TYPES,
+    "video/mp4": ".mp4",
+    "video/webm": ".webm",
+    "video/quicktime": ".mov",
+    "video/x-m4v": ".m4v",
+}
 KNOWN_X_PROFILES = {
     "xiaomustock": "川沐｜Trumoo 🐮",
     "hanking66": "美股仙人",
@@ -112,6 +119,33 @@ class LocalAirtapRelayStore:
                 "seen_scopes": seen_scopes,
             }
 
+    def recent_post_shapes(self, scope: str, *, since_seconds: int, limit: int = 20) -> list[dict[str, Any]]:
+        posts = self.recent_posts(scope, since_seconds=since_seconds, limit=limit)
+        shapes = []
+        for post in posts:
+            quote = post.get("quote") if isinstance(post.get("quote"), dict) else {}
+            shapes.append(
+                {
+                    "id": str(post.get("id") or ""),
+                    "author_name": str(post.get("author_name") or ""),
+                    "author_handle": str(post.get("author_handle") or ""),
+                    "published_at": str(post.get("published_at") or ""),
+                    "url_present": bool(post.get("url")),
+                    "text_present": bool(str(post.get("text") or "").strip()),
+                    "avatar_present": bool(post.get("avatar_url") or post.get("avatar_display_url")),
+                    "image_count": len([value for value in post.get("image_urls") or [] if value]),
+                    "video_count": len([value for value in post.get("video_urls") or [] if value]),
+                    "link_card_count": len([value for value in post.get("link_cards") or [] if value]),
+                    "has_quote": bool(quote),
+                    "quote_text_present": bool(str(quote.get("text") or "").strip()) if quote else False,
+                    "quote_image_count": len([value for value in quote.get("image_urls") or [] if value]) if quote else 0,
+                    "quote_video_count": len([value for value in quote.get("video_urls") or [] if value]) if quote else 0,
+                    "media_error_present": bool(post.get("media_error") or (quote.get("media_error") if quote else "")),
+                    "quote_error_present": bool(post.get("quote_error") or (quote.get("quote_error") if quote else "")),
+                }
+            )
+        return shapes
+
     def recent_posts(self, scope: str, *, since_seconds: int, limit: int = 80) -> list[dict[str, Any]]:
         cutoff = int(time.time()) - since_seconds
         with self._lock:
@@ -172,7 +206,7 @@ class LocalAirtapRelayStore:
             for raw_post in payload.get("posts") or []:
                 if not isinstance(raw_post, dict):
                     continue
-                post = self._enrich_post(state, raw_post)
+                post = self._enrich_post(state, _normalize_post_schema(raw_post))
                 key = _post_key(post)
                 if key in seen_for_scope:
                     duplicate_count += 1
@@ -289,7 +323,7 @@ class LocalAirtapRelayStore:
         return enriched
 
     def _enrich_quote(self, state: dict[str, Any], quote: dict[str, Any]) -> dict[str, Any]:
-        enriched = dict(quote)
+        enriched = _normalize_post_schema(quote)
         stored_post = _find_stored_post(state, enriched)
         if stored_post:
             for field in (
@@ -343,7 +377,7 @@ class LocalAirtapRelayStore:
         return {"avatar_path": filename, "avatar_url": f"/api/airtap/avatars/{filename}"}
 
     def _store_media(self, content: bytes, content_type: str, *, prefix: str = "wechat") -> dict[str, str]:
-        suffix = AVATAR_CONTENT_TYPES.get(content_type, ".jpg")
+        suffix = MEDIA_CONTENT_TYPES.get(content_type, ".jpg")
         safe_prefix = re.sub(r"[^A-Za-z0-9._-]+", "_", prefix).strip("._-") or "wechat"
         filename = f"{safe_prefix}-{_hash_bytes(content)[:16]}{suffix}"
         self.media_dir.mkdir(parents=True, exist_ok=True)
@@ -409,7 +443,7 @@ class SupabaseAirtapRelayStore(LocalAirtapRelayStore):
         return {"avatar_path": path, "avatar_url": self._signed_url(path)}
 
     def _store_media(self, content: bytes, content_type: str, *, prefix: str = "wechat") -> dict[str, str]:
-        suffix = AVATAR_CONTENT_TYPES.get(content_type, ".jpg")
+        suffix = MEDIA_CONTENT_TYPES.get(content_type, ".jpg")
         safe_prefix = re.sub(r"[^A-Za-z0-9._-]+", "_", prefix).strip("._-") or "wechat"
         path = f"airtap/media/{safe_prefix}-{_hash_bytes(content)[:16]}{suffix}"
         self._upload_object(path, content, content_type)
@@ -627,6 +661,7 @@ def _wechat_quote(post: dict[str, Any]) -> str:
 def _wechat_media(post: dict[str, Any]) -> str:
     lines = []
     remaining_image_urls = [str(value) for value in post.get("image_urls") or [] if value]
+    remaining_video_urls = [str(value) for value in post.get("video_urls") or [] if value]
 
     for item in post.get("wechat_media_items") or []:
         if not isinstance(item, dict):
@@ -665,7 +700,34 @@ def _wechat_media(post: dict[str, Any]) -> str:
             '<span style="color:#475569;">已记录，未能稳定内嵌时不在微信里展示外链。</span>'
             "</div>"
         )
-    for url in [str(value) for value in post.get("video_urls") or [] if value]:
+    for item in post.get("wechat_video_items") or []:
+        if not isinstance(item, dict):
+            continue
+        display_url = str(item.get("display_url") or "")
+        original_url = str(item.get("url") or "")
+        if not display_url:
+            continue
+        safe_url = html.escape(display_url)
+        source_url = html.escape(original_url)
+        source_link = (
+            f'<a href="{source_url}" style="display:inline-block;margin-top:8px;color:#2563eb;text-decoration:none;'
+            'font-size:13px;font-weight:700;">打开原视频</a>'
+            if original_url
+            else ""
+        )
+        lines.append(
+            '<div style="margin-top:12px;border:1px solid #e2e8f0;border-radius:9px;background:#fff;overflow:hidden;">'
+            '<div style="padding:9px 10px;">'
+            '<div style="font-size:12px;font-weight:800;color:#7c3aed;margin-bottom:6px;">视频预览</div>'
+            f'<video src="{safe_url}" controls preload="metadata" playsinline '
+            'style="display:block;width:100%;max-width:100%;height:auto;border-radius:8px;background:#0f172a;"></video>'
+            f"{source_link}"
+            "</div></div>"
+        )
+        if original_url in remaining_video_urls:
+            remaining_video_urls.remove(original_url)
+
+    for url in remaining_video_urls:
         if _youtube_video_id(url):
             continue
         safe_url = html.escape(url)
@@ -893,6 +955,221 @@ def _plain_quote(post: dict[str, Any]) -> str:
         return ""
     author = quote.get("author_name") or quote.get("author_handle") or "quoted post"
     return f"引用：{author} - {quote.get('text', '')}"
+
+
+def _normalize_post_schema(post: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(post)
+    _copy_first_present(normalized, "id", ("tweet_id", "status_id", "post_id", "tweetId", "statusId"))
+    _copy_first_present(normalized, "url", ("canonical_url", "source_url", "original_url", "permalink", "href"))
+    _copy_first_present(normalized, "author_name", ("display_name", "name", "user_name", "username_display"))
+    _copy_first_present(
+        normalized,
+        "author_handle",
+        ("handle", "username", "screen_name", "source_handle", "author_username", "user_handle"),
+    )
+    _copy_first_present(normalized, "published_at", ("time", "timestamp", "created_at", "createdAt", "published"))
+    _copy_first_present(normalized, "text", ("full_text", "content", "body", "tweet_text", "tweetText"))
+
+    normalized["author_handle"] = str(normalized.get("author_handle") or "").strip().lstrip("@")
+    if _is_missing_post_value(normalized.get("url")):
+        inferred_url = _x_status_url_from_parts(
+            str(normalized.get("author_handle") or ""),
+            str(normalized.get("id") or ""),
+        )
+        if inferred_url:
+            normalized["url"] = inferred_url
+
+    normalized["image_urls"] = _merged_urls(
+        normalized.get("image_urls"),
+        _urls_from_fields(normalized, ("images", "image", "photo_urls", "photos", "picture_urls", "image_url")),
+        _classified_media_urls(normalized, kind="image"),
+    )
+    normalized["video_urls"] = _merged_urls(
+        normalized.get("video_urls"),
+        _urls_from_fields(normalized, ("videos", "video", "video_url", "playback_url", "videoUrl")),
+        _classified_media_urls(normalized, kind="video"),
+    )
+    normalized["link_cards"] = _normalized_cards(
+        normalized.get("link_cards") or normalized.get("links") or normalized.get("cards") or []
+    )
+    normalized["youtube_cards"] = _normalized_cards(normalized.get("youtube_cards") or normalized.get("youtube") or [])
+
+    quote = _normalize_quote_schema(normalized)
+    if quote:
+        normalized["quote"] = quote
+    return normalized
+
+
+def _normalize_quote_schema(post: dict[str, Any]) -> dict[str, Any]:
+    quote_value = post.get("quote")
+    for field in ("quoted_post", "quoted_tweet", "quoted_status", "quote_tweet", "quoted"):
+        if not quote_value and isinstance(post.get(field), (dict, str)):
+            quote_value = post.get(field)
+
+    quote: dict[str, Any] = {}
+    if isinstance(quote_value, dict):
+        quote = dict(quote_value)
+    elif isinstance(quote_value, str) and quote_value.strip():
+        quote = {"text": quote_value.strip()}
+
+    _copy_first_present(quote, "id", ("tweet_id", "status_id", "post_id", "tweetId", "statusId"))
+    _copy_first_present(quote, "url", ("canonical_url", "source_url", "original_url", "permalink", "href"))
+    _copy_first_present(quote, "author_name", ("display_name", "name", "user_name", "username_display"))
+    _copy_first_present(
+        quote,
+        "author_handle",
+        ("handle", "username", "screen_name", "source_handle", "author_username", "user_handle"),
+    )
+    _copy_first_present(quote, "published_at", ("time", "timestamp", "created_at", "createdAt", "published"))
+    _copy_first_present(quote, "text", ("full_text", "content", "body", "tweet_text", "tweetText"))
+
+    flat_mapping = {
+        "id": ("quote_id", "quoted_id", "quoted_post_id", "quoted_tweet_id"),
+        "url": ("quote_url", "quoted_url", "quoted_post_url", "quoted_tweet_url"),
+        "author_name": ("quote_author_name", "quoted_author_name", "quote_display_name", "quoted_display_name"),
+        "author_handle": (
+            "quote_author_handle",
+            "quoted_author_handle",
+            "quote_handle",
+            "quoted_handle",
+            "quote_username",
+            "quoted_username",
+        ),
+        "published_at": ("quote_published_at", "quoted_published_at", "quote_time", "quoted_time"),
+        "text": ("quote_text", "quoted_text", "quote_full_text", "quoted_full_text"),
+    }
+    for target, aliases in flat_mapping.items():
+        value = _first_present_value(post, aliases)
+        if not _is_missing_post_value(value) and _is_missing_post_value(quote.get(target)):
+            quote[target] = value
+
+    quote["author_handle"] = str(quote.get("author_handle") or "").strip().lstrip("@")
+    if _is_missing_post_value(quote.get("url")):
+        inferred_url = _x_status_url_from_parts(str(quote.get("author_handle") or ""), str(quote.get("id") or ""))
+        if inferred_url:
+            quote["url"] = inferred_url
+
+    quote["image_urls"] = _merged_urls(
+        quote.get("image_urls"),
+        _urls_from_fields(quote, ("images", "image", "photo_urls", "photos", "picture_urls", "image_url")),
+        _urls_from_fields(post, ("quote_image_urls", "quoted_image_urls", "quote_images", "quoted_images")),
+        _classified_media_urls(quote, kind="image"),
+    )
+    quote["video_urls"] = _merged_urls(
+        quote.get("video_urls"),
+        _urls_from_fields(quote, ("videos", "video", "video_url", "playback_url", "videoUrl")),
+        _urls_from_fields(post, ("quote_video_urls", "quoted_video_urls", "quote_videos", "quoted_videos")),
+        _classified_media_urls(quote, kind="video"),
+    )
+    quote["link_cards"] = _normalized_cards(
+        quote.get("link_cards") or quote.get("links") or post.get("quote_link_cards") or post.get("quoted_link_cards") or []
+    )
+    quote["youtube_cards"] = _normalized_cards(
+        quote.get("youtube_cards") or quote.get("youtube") or post.get("quote_youtube_cards") or []
+    )
+
+    return quote if any(not _is_missing_post_value(quote.get(field)) for field in ("id", "url", "text", "author_handle", "author_name")) else {}
+
+
+def _copy_first_present(target: dict[str, Any], field: str, aliases: tuple[str, ...]) -> None:
+    if not _is_missing_post_value(target.get(field)):
+        return
+    value = _first_present_value(target, aliases)
+    if not _is_missing_post_value(value):
+        target[field] = value
+
+
+def _first_present_value(record: dict[str, Any], fields: tuple[str, ...]) -> Any:
+    for field in fields:
+        value = record.get(field)
+        if not _is_missing_post_value(value):
+            return value
+    return None
+
+
+def _merged_urls(*values: Any) -> list[str]:
+    urls: list[str] = []
+    for value in values:
+        urls.extend(_urls_from_value(value))
+    return list(dict.fromkeys(urls))
+
+
+def _urls_from_fields(record: dict[str, Any], fields: tuple[str, ...]) -> list[str]:
+    urls: list[str] = []
+    for field in fields:
+        urls.extend(_urls_from_value(record.get(field)))
+    return list(dict.fromkeys(urls))
+
+
+def _urls_from_value(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [match.group(0).rstrip(").,，。]】") for match in re.finditer(r"https?://[^\s\"'<>]+", value)]
+    if isinstance(value, dict):
+        urls: list[str] = []
+        for key in (
+            "url",
+            "href",
+            "src",
+            "media_url",
+            "media_url_https",
+            "expanded_url",
+            "image_url",
+            "thumbnail_url",
+            "video_url",
+            "playback_url",
+        ):
+            urls.extend(_urls_from_value(value.get(key)))
+        for key in ("variants", "sources", "items"):
+            urls.extend(_urls_from_value(value.get(key)))
+        return list(dict.fromkeys(urls))
+    if isinstance(value, (list, tuple, set)):
+        urls: list[str] = []
+        for item in value:
+            urls.extend(_urls_from_value(item))
+        return list(dict.fromkeys(urls))
+    return []
+
+
+def _classified_media_urls(record: dict[str, Any], *, kind: str) -> list[str]:
+    urls = _urls_from_fields(record, ("media", "media_urls", "attachments"))
+    if kind == "video":
+        return [url for url in urls if _looks_like_video_url(url)]
+    return [url for url in urls if not _looks_like_video_url(url)]
+
+
+def _normalized_cards(value: Any) -> list[dict[str, str]]:
+    cards: list[dict[str, str]] = []
+    raw_items = value if isinstance(value, list) else [value] if value else []
+    for item in raw_items:
+        if isinstance(item, dict):
+            card = {
+                "provider": str(item.get("provider") or item.get("site") or item.get("source") or ""),
+                "title": str(item.get("title") or item.get("text") or ""),
+                "url": str(item.get("url") or item.get("href") or ""),
+                "thumbnail_url": str(item.get("thumbnail_url") or item.get("image_url") or item.get("thumbnail") or ""),
+            }
+            if card["url"] or card["thumbnail_url"] or card["title"]:
+                cards.append(card)
+        elif isinstance(item, str):
+            for url in _urls_from_value(item):
+                cards.append({"provider": "", "title": "", "url": url, "thumbnail_url": ""})
+    return cards
+
+
+def _x_status_url_from_parts(handle: str, status_id: str) -> str:
+    clean_handle = str(handle or "").strip().lstrip("@")
+    clean_id = str(status_id or "").strip()
+    if not clean_handle or not re.fullmatch(r"\d{6,}", clean_id):
+        return ""
+    return f"https://x.com/{clean_handle}/status/{clean_id}"
+
+
+def _looks_like_video_url(url: str) -> bool:
+    parsed = urlparse(str(url or ""))
+    path = parsed.path.lower()
+    return path.endswith((".mp4", ".webm", ".mov", ".m4v", ".m3u8")) or "video" in parsed.netloc.lower()
 
 
 def _plain_media(label: str, urls: list[Any]) -> str:

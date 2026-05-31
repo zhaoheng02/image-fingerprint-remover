@@ -6,3 +6,4 @@ uvicorn
 python-multipart
 httpx
 boto3
+yt-dlp

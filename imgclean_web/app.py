@@ -1,6 +1,7 @@
 """FastAPI web app for browser-based image cleaning."""
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import time
@@ -13,6 +14,7 @@ import inspect as pyinspect
 import io
 import json
 import logging
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -30,6 +32,9 @@ from imgclean.findings import InspectReport
 from .airtap_relay import (
     LocalAirtapRelayStore,
     SupabaseAirtapRelayStore,
+    _is_direct_video_url,
+    _youtube_urls,
+    _youtube_video_id,
     render_wechat_pushplus,
     render_xiaohongshu_note,
 )
@@ -55,10 +60,12 @@ AIRTAP_MAX_AVATAR_BYTES = 2 * 1024 * 1024
 AIRTAP_AVATAR_CONTENT_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
 AIRTAP_WECHAT_INLINE_SOURCE_MAX_BYTES = 6 * 1024 * 1024
 AIRTAP_WECHAT_INLINE_CONTENT_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
+AIRTAP_WECHAT_VIDEO_CONTENT_TYPES = {"video/mp4", "video/webm", "video/quicktime", "video/x-m4v"}
 AIRTAP_WECHAT_HOSTED_AVATAR_OUTPUT_MAX_BYTES = 48 * 1024
 AIRTAP_WECHAT_HOSTED_AVATAR_MAX_EDGES = (180, 128, 96)
 AIRTAP_WECHAT_HOSTED_IMAGE_OUTPUT_MAX_BYTES = 700 * 1024
 AIRTAP_WECHAT_HOSTED_IMAGE_MAX_EDGES = (1280, 960, 720, 480)
+DEFAULT_AIRTAP_WECHAT_VIDEO_MAX_MB = 25
 PUSHPLUS_UPLOAD_TOKEN_ENDPOINT = "https://www.pushplus.plus/api/open/userImage/uploadToken"
 AIRTAP_API_BASE_URL = "https://airtap.ai/cortex/api"
 logger = logging.getLogger(__name__)
@@ -108,6 +115,8 @@ class WebSettings:
     airtap_personal_access_token: str
     airtap_xhs_model_id: str
     airtap_receiver_id: str
+    airtap_video_download_enabled: bool
+    airtap_video_max_bytes: int
     cron_secret: str
     pushplus_token: str
     pushplus_access_key: str
@@ -176,6 +185,12 @@ class WebSettings:
             airtap_personal_access_token=os.environ.get("AIRTAP_PERSONAL_ACCESS_TOKEN", ""),
             airtap_xhs_model_id=os.environ.get("AIRTAP_XHS_MODEL_ID", "airtap-1.0"),
             airtap_receiver_id=os.environ.get("AIRTAP_RECEIVER_ID", "cloud"),
+            airtap_video_download_enabled=_env_bool(os.environ.get("AIRTAP_WECHAT_VIDEO_DOWNLOAD_ENABLED", "true")),
+            airtap_video_max_bytes=int(
+                os.environ.get("AIRTAP_WECHAT_VIDEO_MAX_MB", str(DEFAULT_AIRTAP_WECHAT_VIDEO_MAX_MB))
+            )
+            * 1024
+            * 1024,
             cron_secret=os.environ.get("CRON_SECRET", ""),
             pushplus_token=os.environ.get("PUSHPLUS_TOKEN", ""),
             pushplus_access_key=os.environ.get("PUSHPLUS_ACCESS_KEY", ""),
@@ -392,6 +407,18 @@ def create_app() -> FastAPI:
         _require_airtap_relay_secret(request, settings)
         return {"ok": True, "summary": app.state.airtap_relay.summary()}
 
+    @app.get("/api/airtap/debug/recent")
+    def airtap_debug_recent(request: Request, scope: str = "x-hourly-wechat", hours: int = 1, limit: int = 20) -> dict[str, Any]:
+        _require_airtap_relay_secret(request, settings)
+        safe_hours = min(max(hours, 1), 24)
+        safe_limit = min(max(limit, 1), 100)
+        shapes = app.state.airtap_relay.recent_post_shapes(
+            scope,
+            since_seconds=safe_hours * 60 * 60,
+            limit=safe_limit,
+        )
+        return {"ok": True, "scope": scope, "hours": safe_hours, "count": len(shapes), "posts": shapes}
+
     @app.get("/api/airtap/avatars/{filename}")
     def airtap_avatar(filename: str) -> FileResponse:
         path = app.state.airtap_relay.avatar_path(filename)
@@ -407,7 +434,21 @@ def create_app() -> FastAPI:
         if not path.exists() or not path.is_file():
             raise HTTPException(status_code=404, detail="Media not found.")
         suffix = path.suffix.lower()
-        media_type = "image/jpeg" if suffix in {".jpg", ".jpeg"} else "image/webp" if suffix == ".webp" else "image/png"
+        media_type = (
+            "image/jpeg"
+            if suffix in {".jpg", ".jpeg"}
+            else "image/webp"
+            if suffix == ".webp"
+            else "video/mp4"
+            if suffix == ".mp4"
+            else "video/webm"
+            if suffix == ".webm"
+            else "video/quicktime"
+            if suffix == ".mov"
+            else "video/x-m4v"
+            if suffix == ".m4v"
+            else "image/png"
+        )
         return FileResponse(path, media_type=media_type)
 
     @app.post("/api/airtap/posts/render")
@@ -1103,23 +1144,27 @@ async def _download_airtap_profile_avatars(profiles: list[Any]) -> list[dict[str
 async def _prepare_airtap_wechat_media(app: FastAPI, posts: list[dict[str, Any]], settings: WebSettings) -> None:
     urls: list[str] = []
     entries = _airtap_post_entries(posts)
+    has_video_sources = False
     for post in entries:
         avatar_url = str(post.get("avatar_url") or "").strip()
         if avatar_url:
             urls.append(avatar_url)
         urls.extend(str(url) for url in post.get("image_urls") or [] if url)
-    if not urls:
+        urls.extend(_airtap_youtube_thumbnail_urls(post))
+        if _airtap_video_source_urls(post):
+            has_video_sources = True
+    if not urls and not has_video_sources:
         return
+    image_cache: dict[str, bytes] = {}
 
     async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
         upload_config = await _get_pushplus_upload_config(client, settings)
-        cache: dict[str, bytes] = {}
         for url in dict.fromkeys(urls):
-            cache[url] = await _download_wechat_image_bytes(client, url)
+            image_cache[url] = await _download_wechat_image_bytes(client, url)
 
         for post in entries:
             avatar_url = str(post.get("avatar_url") or "").strip()
-            avatar_source = cache.get(avatar_url, b"")
+            avatar_source = image_cache.get(avatar_url, b"")
             if avatar_source:
                 try:
                     avatar_bytes = _image_bytes_to_jpeg_bytes(
@@ -1148,7 +1193,7 @@ async def _prepare_airtap_wechat_media(app: FastAPI, posts: list[dict[str, Any]]
 
             media_items = []
             for url in post.get("image_urls") or []:
-                source = cache.get(str(url), b"")
+                source = image_cache.get(str(url), b"")
                 if not source:
                     continue
                 try:
@@ -1172,6 +1217,111 @@ async def _prepare_airtap_wechat_media(app: FastAPI, posts: list[dict[str, Any]]
                     media_items.append({"url": str(url), "display_url": display_url})
             if media_items:
                 post["wechat_media_items"] = media_items
+
+            await _prepare_airtap_youtube_thumbnails(app, client, settings, upload_config, post, image_cache)
+
+            video_items = []
+            for url in _airtap_video_source_urls(post):
+                video = await _download_wechat_video(client, url, settings)
+                if not video:
+                    continue
+                display_url = await _publish_wechat_video(
+                    app,
+                    video["content"],
+                    video["content_type"],
+                    prefix="wechat-video",
+                )
+                if display_url:
+                    video_items.append(
+                        {
+                            "url": url,
+                            "display_url": display_url,
+                            "content_type": video["content_type"],
+                            "source": video.get("source", ""),
+                        }
+                    )
+            if video_items:
+                post["wechat_video_items"] = video_items
+
+
+def _airtap_video_source_urls(post: dict[str, Any]) -> list[str]:
+    urls: list[str] = []
+    for value in post.get("video_urls") or []:
+        url = str(value or "").strip()
+        if url:
+            urls.append(url)
+    for card in list(post.get("youtube_cards") or []) + list(post.get("link_cards") or []):
+        if not isinstance(card, dict):
+            continue
+        provider = str(card.get("provider") or card.get("site") or "").lower()
+        url = str(card.get("url") or card.get("href") or "").strip()
+        if url and ("youtube" in provider or _youtube_video_id(url)):
+            urls.append(url)
+    text = str(post.get("text") or "")
+    urls.extend(_youtube_urls(text))
+    return list(dict.fromkeys(urls))
+
+
+def _airtap_youtube_thumbnail_urls(post: dict[str, Any]) -> list[str]:
+    urls = []
+    for card in list(post.get("youtube_cards") or []) + list(post.get("link_cards") or []):
+        if not isinstance(card, dict):
+            continue
+        provider = str(card.get("provider") or card.get("site") or "").lower()
+        url = str(card.get("url") or card.get("href") or "").strip()
+        if "youtube" not in provider and not _youtube_video_id(url):
+            continue
+        thumbnail = str(card.get("thumbnail_url") or card.get("image_url") or "").strip()
+        if thumbnail:
+            urls.append(thumbnail)
+    for url in _youtube_urls(str(post.get("text") or "")):
+        video_id = _youtube_video_id(url)
+        if video_id:
+            urls.append(f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg")
+    return list(dict.fromkeys(urls))
+
+
+async def _prepare_airtap_youtube_thumbnails(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    settings: WebSettings,
+    upload_config: dict[str, str],
+    post: dict[str, Any],
+    image_cache: dict[str, bytes],
+) -> None:
+    for card in list(post.get("youtube_cards") or []) + list(post.get("link_cards") or []):
+        if not isinstance(card, dict):
+            continue
+        provider = str(card.get("provider") or card.get("site") or "").lower()
+        url = str(card.get("url") or card.get("href") or "").strip()
+        if "youtube" not in provider and not _youtube_video_id(url):
+            continue
+        thumbnail_url = str(card.get("thumbnail_url") or card.get("image_url") or "").strip()
+        if not thumbnail_url:
+            video_id = _youtube_video_id(url)
+            thumbnail_url = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg" if video_id else ""
+        source = image_cache.get(thumbnail_url, b"")
+        if not source:
+            continue
+        try:
+            image_bytes = _image_bytes_to_jpeg_bytes(
+                source,
+                max_edges=AIRTAP_WECHAT_HOSTED_IMAGE_MAX_EDGES,
+                output_max_bytes=AIRTAP_WECHAT_HOSTED_IMAGE_OUTPUT_MAX_BYTES,
+            )
+        except (OSError, UnidentifiedImageError, ValueError) as exc:
+            logger.warning("Airtap WeChat YouTube thumbnail encode failed: url=%s error=%s", thumbnail_url, exc)
+            continue
+        display_url = await _publish_wechat_image(
+            app,
+            client,
+            settings,
+            upload_config,
+            image_bytes,
+            prefix="wechat-youtube",
+        )
+        if display_url:
+            card["display_url"] = display_url
 
 
 def _airtap_post_entries(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1203,6 +1353,100 @@ async def _download_wechat_image_bytes(client: httpx.AsyncClient, url: str) -> b
         logger.warning("Airtap WeChat image too large to process: url=%s bytes=%s", url, len(response.content))
         return b""
     return response.content
+
+
+async def _download_wechat_video(
+    client: httpx.AsyncClient,
+    url: str,
+    settings: WebSettings,
+) -> dict[str, Any] | None:
+    if not settings.airtap_video_download_enabled:
+        return None
+    if _youtube_video_id(url):
+        return await _download_youtube_video(url, settings)
+    return await _download_direct_wechat_video(client, url, settings)
+
+
+async def _download_direct_wechat_video(
+    client: httpx.AsyncClient,
+    url: str,
+    settings: WebSettings,
+) -> dict[str, Any] | None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    if not _is_direct_video_url(url):
+        return None
+    try:
+        response = await client.get(url)
+        response.raise_for_status()
+    except Exception as exc:
+        logger.warning("Airtap WeChat video download failed: url=%s error=%s", url, exc)
+        return None
+    if len(response.content) > settings.airtap_video_max_bytes:
+        logger.warning("Airtap WeChat video too large to store: url=%s bytes=%s", url, len(response.content))
+        return None
+    content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type not in AIRTAP_WECHAT_VIDEO_CONTENT_TYPES:
+        content_type = _video_content_type_from_url(url)
+    if content_type not in AIRTAP_WECHAT_VIDEO_CONTENT_TYPES:
+        return None
+    return {"content": response.content, "content_type": content_type, "source": "direct"}
+
+
+async def _download_youtube_video(url: str, settings: WebSettings) -> dict[str, Any] | None:
+    try:
+        return await asyncio.to_thread(_download_youtube_video_sync, url, settings.airtap_video_max_bytes)
+    except Exception as exc:
+        logger.warning("Airtap WeChat YouTube download failed: url=%s error=%s", url, exc)
+        return None
+
+
+def _download_youtube_video_sync(url: str, max_bytes: int) -> dict[str, Any] | None:
+    try:
+        import yt_dlp  # type: ignore
+    except ImportError:
+        logger.warning("yt-dlp is not installed; YouTube video will remain a link card.")
+        return None
+    max_mb = max(1, max_bytes // (1024 * 1024))
+    with tempfile.TemporaryDirectory(prefix="airtap-youtube-") as tmpdir:
+        output_template = str(Path(tmpdir) / "video.%(ext)s")
+        options = {
+            "format": f"best[ext=mp4][filesize<{max_mb}M]/best[filesize<{max_mb}M]/best[ext=mp4]/best",
+            "noplaylist": True,
+            "outtmpl": output_template,
+            "quiet": True,
+            "no_warnings": True,
+            "socket_timeout": 20,
+            "retries": 1,
+            "max_filesize": max_bytes,
+        }
+        with yt_dlp.YoutubeDL(options) as ydl:
+            ydl.download([url])
+        files = sorted(Path(tmpdir).glob("video.*"))
+        if not files:
+            return None
+        video_path = files[0]
+        content = video_path.read_bytes()
+        if len(content) > max_bytes:
+            return None
+        content_type = _video_content_type_from_url(video_path.name)
+        if content_type not in AIRTAP_WECHAT_VIDEO_CONTENT_TYPES:
+            content_type = "video/mp4"
+        return {"content": content, "content_type": content_type, "source": "youtube"}
+
+
+def _video_content_type_from_url(url: str) -> str:
+    path = urlparse(str(url or "")).path.lower()
+    if path.endswith(".mp4"):
+        return "video/mp4"
+    if path.endswith(".webm"):
+        return "video/webm"
+    if path.endswith(".mov"):
+        return "video/quicktime"
+    if path.endswith(".m4v"):
+        return "video/x-m4v"
+    return ""
 
 
 async def _get_pushplus_upload_config(client: httpx.AsyncClient, settings: WebSettings) -> dict[str, str]:
@@ -1245,6 +1489,21 @@ async def _publish_wechat_image(
         stored = app.state.airtap_relay.store_media(content, "image/jpeg", prefix=prefix)
     except Exception as exc:
         logger.warning("Airtap WeChat media storage failed: %s", exc)
+        return ""
+    return str(stored.get("media_url") or "")
+
+
+async def _publish_wechat_video(
+    app: FastAPI,
+    content: bytes,
+    content_type: str,
+    *,
+    prefix: str,
+) -> str:
+    try:
+        stored = app.state.airtap_relay.store_media(content, content_type, prefix=prefix)
+    except Exception as exc:
+        logger.warning("Airtap WeChat video storage failed: %s", exc)
         return ""
     return str(stored.get("media_url") or "")
 

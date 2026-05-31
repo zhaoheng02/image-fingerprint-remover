@@ -91,20 +91,20 @@ def _print_channel_prompt(api_base: str, secret: str, *, channel_plan: str, dry_
             else ""
         )
         xhs_steps = f"""
-13. If response.new_count is 0, stop. Do not open Xiaohongshu.
-14. If response.new_count is greater than 0, open Xiaohongshu and create a note using exactly:
+15. If response.new_count is 0, stop. Do not open Xiaohongshu.
+16. If response.new_count is greater than 0, open Xiaohongshu and create a note using exactly:
    - title: response.channels.xiaohongshu.title
    - body: response.channels.xiaohongshu.body
    - hashtags: response.channels.xiaohongshu.hashtags
    - media: attach the collected local images/videos when the app allows it. Do not paste raw X links into the note body.
-15. {dry_run_safety}
-16. {final_publish}
-17. Report response.new_count, response.duplicate_count, channels.xiaohongshu.title, Xiaohongshu publish/draft result, and any blocked step. Never expose PushPlus token, OpenAI key, or the relay secret in the final report."""
+17. {dry_run_safety}
+18. {final_publish}
+19. Report response.new_count, response.duplicate_count, channels.xiaohongshu.title, Xiaohongshu publish/draft result, and any blocked step. Never expose PushPlus token, OpenAI key, or the relay secret in the final report."""
     else:
         xhs_steps = """
-13. If response.new_count is 0, stop; there is nothing to push this hour.
-14. If response.new_count is greater than 0, the backend already handled WeChat PushPlus delivery. Do not open Xiaohongshu in this WeChat-only plan.
-15. Report response.new_count, response.duplicate_count, pushes.wechat.ok/reason, and any blocked step. Never expose PushPlus token, OpenAI key, or the relay secret in the final report."""
+15. If response.new_count is 0, stop; there is nothing to push this hour.
+16. If response.new_count is greater than 0, the backend already handled WeChat PushPlus delivery. Do not open Xiaohongshu in this WeChat-only plan.
+17. Report response.new_count, response.duplicate_count, pushes.wechat.ok/reason, and any blocked step. Never expose PushPlus token, OpenAI key, or the relay secret in the final report."""
 
     print(
         f"""{title}.
@@ -124,18 +124,22 @@ Collection rules:
 {_search_urls()}
 2. Collect posts from {zh_window}. Stop each account only after the visible feed is older than that time window.
 3. {sampling_rule}
-4. For every post, extract these raw fields exactly: id or canonical URL, author display name, author handle, relative/absolute publish time, original text, original post URL, image URLs, video URLs, and link cards.
-   If the post quotes/reposts another X post, open or expand the quoted post enough to capture the quoted post URL/id, author display name, handle, publish time, full visible text, image URLs, video URLs, and link cards. Do not send only the small collapsed quote stub.
-5. For avatars, use an already visible/easy profile avatar URL when available. Do not open image tabs or spend extra steps trying to obtain direct avatar URLs; omitting avatar_url is acceptable.
-6. Download or keep Airtap live URLs for images/videos when possible. Do not summarize posts in Airtap; the backend owns formatting, dedupe, WeChat delivery, and Xiaohongshu copy.
+4. For every post, extract raw fields only. Do not translate, rewrite, summarize, shorten, or infer the post body.
+   Required fields per post: id or canonical URL, author display name, author handle, relative/absolute publish time, original visible text, original post URL, image URLs, video URLs, and link cards.
+   If the post contains visible images or video, `image_urls` / `video_urls` must not be silently empty. Use direct X media URLs when available; otherwise download/open the media on the cloud phone and pass stable Airtap live file URLs such as `https://airtap.ai/content/live/android-files/...`.
+   If a media URL cannot be obtained, add a short `media_error` field explaining what failed.
+5. If the post quotes/reposts another X post, open or expand the quoted post. The `quote` object must include the quoted URL/id, author display name, handle, publish time, full visible text, image URLs, video URLs, and link cards. Do not send only the small collapsed quote stub.
+   If the quoted post is no longer visible or cannot be opened, still include `quote.url` and `quote.author_handle` when visible, plus `quote_error`.
+6. For avatars, use an already visible/easy profile avatar URL when available. Do not open image tabs or spend extra steps trying to obtain direct avatar URLs; omitting avatar_url is acceptable because the backend has a profile cache.
 7. Backend calls are a hard gate. Use Termux/curl or another reliable HTTP client on the cloud phone. Do not use browser page text as a substitute for an API response. Do not compose Xiaohongshu content yourself.
 8. Do not write huge JSON by typing it into the terminal manually. In Termux, use a Python heredoc like `python3 - <<'PY'` to create compact request JSON files, then call curl with `--data-binary @file.json`.
-9. For every account you visited, call `/api/airtap/profiles/upsert` with the display name and handle you observed, even when avatar_url is omitted:
+9. Before posting to the backend, self-check the JSON: any post that visibly has a quote must contain `quote`; any post that visibly has media must contain `image_urls` or `video_urls` or a `media_error`.
+10. For every account you visited, call `/api/airtap/profiles/upsert` with the display name and handle you observed, even when avatar_url is omitted:
    POST {api_base}/api/airtap/profiles/upsert
    Headers: content-type: application/json, x-airtap-secret: {secret}
    Body: {{"profiles":[{{"display_name":"...","handle":"..."}}]}}
    This call must return HTTP 200 before you continue.
-10. Then call:
+11. Then call:
    POST {api_base}{endpoint}
    Headers: content-type: application/json, x-airtap-secret: {secret}
    Body shape:
@@ -157,8 +161,9 @@ Collection rules:
        }}
      ]
    }}
-11. The backend call must return HTTP 200 JSON. If the backend response is missing, non-200, or cannot be parsed, stop and report the backend error.
-12. Do not generate local replacement copy. For Xiaohongshu, use response.channels.xiaohongshu exactly; for WeChat, the backend already pushes.
+12. The backend call must return HTTP 200 JSON. If the backend response is missing, non-200, or cannot be parsed, stop and report the backend error.
+13. Inspect the backend JSON response before finishing: report response.new_count, response.duplicate_count, pushes.wechat.ok/reason, and the count of posts you sent with quote/image/video fields. Do not expose secrets.
+14. Do not generate local replacement copy. For Xiaohongshu, use response.channels.xiaohongshu exactly; for WeChat, the backend already pushes.
 {xhs_steps}
 """
     )
@@ -191,7 +196,7 @@ Every run:
 Use these X search URLs directly:
 {_search_urls()}
 
-For every post, extract: id/canonical URL, author display name, author handle, publish time, original text, original post URL, image URLs, video URLs, and link cards. If there is a quoted X post, open/expand it and include quoted URL/id, quoted author display name, quoted handle, quoted publish time, full visible quoted text, quoted image/video URLs, and quoted link cards. For YouTube cards, include title, URL, and thumbnail URL when visible. Do not summarize inside Airtap; the backend owns formatting, dedupe, WeChat delivery, and Xiaohongshu copy.
+For every post, extract raw data only and send it in JSON with these exact snake_case keys: id, author_name, author_handle, published_at, text, url, image_urls, video_urls, link_cards, quote. Do not translate, rewrite, summarize, shorten, or infer the post body. If id and handle are visible, set url to https://x.com/<handle>/status/<id> even if the browser address bar is unavailable. If the post visibly contains media, image_urls / video_urls must not be silently empty: use direct media URLs or Airtap live file URLs after opening/downloading the media; otherwise include media_error. A short token like "含图 HJpvlt6XUAIesk5" is not a media URL; either turn it into a real https://pbs.twimg.com/media/... URL / Airtap file URL or set media_error. If there is a quoted X post, the JSON post must contain a quote object with quoted id/url, author_name, author_handle, published_at, text, image_urls, video_urls, and link_cards. Do not put quote details only in your final report. If the quote cannot be opened, still include quote.url or quote.id/quote.author_handle plus quote_error. For YouTube cards, include title, URL, and thumbnail URL when visible. Before curl, validate posts_publish.json: every collected post has url; every visible quote has quote; every visible media item has image_urls/video_urls or media_error. If validation fails, fix the JSON before POST. Do not summarize inside Airtap; the backend owns formatting, dedupe, WeChat delivery, and Xiaohongshu copy.
 """
     )
 
