@@ -184,7 +184,7 @@ Every run:
 4. Call POST {api_base}/api/airtap/profiles/upsert for observed profiles.
 5. Call POST {api_base}{endpoint} with scope "x-hourly-wechat", channels ["wechat"], and the collected posts.
 6. WeChat content must come from the backend. Do not push to PushPlus yourself and do not show raw X links as message body.
-7. Do not open Xiaohongshu. A separate server/GitHub scheduled job will later call the backend dispatch endpoint, and the backend will create a separate Airtap task for Xiaohongshu publishing from stored posts.
+7. Do not open Xiaohongshu. A separate server/GitHub scheduled job will later call the backend dispatch endpoint. The backend will push the Xiaohongshu note to WeChat for approval, and only after the signed confirmation link is tapped will the backend create a separate Airtap task for Xiaohongshu publishing.
 8. Backend calls are a hard gate. Use Termux/curl or another reliable HTTP client on the cloud phone. Do not use browser page text as a substitute for API JSON.
 9. Never expose PushPlus token, OpenAI key, or the relay secret in reports. The relay secret must only be sent as x-airtap-secret: {secret}.
 
