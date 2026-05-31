@@ -524,18 +524,14 @@ def render_xiaohongshu_note(posts: list[dict[str, Any]]) -> dict[str, Any]:
                     item
                     for item in [
                         f"{index}. {_plain_author(post)}提到：{_plain_text(post)}",
-                        f"我会这么看：{_editorial_take(post)}",
+                        f"AI分析：{_editorial_take(post)}",
                         _plain_quote(post),
                         "有图/视频素材，可以在发小红书时配上。" if (post.get("image_urls") or post.get("video_urls")) else "",
                     ]
                     if item
                 )
             )
-        body = (
-            "这 8 小时我帮你把几个 X 账号的信息压了一遍。不是逐条搬运，主要看这些线索背后可能说明什么。\n\n"
-            + "\n\n---\n\n".join(sections)
-            + "\n\n整体看下来，先当作信息雷达，不急着下结论；真正要交易还是回到财报、流动性和自己的仓位。"
-        )
+        body = "\n\n---\n\n".join(sections)
     return {
         "format": "note",
         "title": title,
@@ -669,13 +665,28 @@ def _wechat_media(post: dict[str, Any]) -> str:
             '<span style="color:#475569;">已记录，未能稳定内嵌时不在微信里展示外链。</span>'
             "</div>"
         )
-    for label, urls in (("视频素材", post.get("video_urls") or []),):
-        for _url in urls:
+    for url in [str(value) for value in post.get("video_urls") or [] if value]:
+        if _youtube_video_id(url):
+            continue
+        safe_url = html.escape(url)
+        if _is_direct_video_url(url):
             lines.append(
-                '<div style="margin-top:6px;padding:8px 10px;background:#f8fafc;border-radius:8px;'
-                'border:1px solid #e2e8f0;word-break:break-all;overflow-wrap:anywhere;">'
-                f'<span style="font-weight:700;color:#0f172a;">{html.escape(label)}</span>：'
-                '<span style="color:#475569;">已记录，发布小红书时优先使用本地下载素材。</span>'
+                '<div style="margin-top:12px;border:1px solid #e2e8f0;border-radius:9px;background:#fff;overflow:hidden;">'
+                '<div style="padding:9px 10px;">'
+                '<div style="font-size:12px;font-weight:800;color:#7c3aed;margin-bottom:6px;">视频预览</div>'
+                f'<video src="{safe_url}" controls preload="metadata" playsinline '
+                'style="display:block;width:100%;max-width:100%;height:auto;border-radius:8px;background:#0f172a;"></video>'
+                f'<a href="{safe_url}" style="display:inline-block;margin-top:8px;color:#2563eb;text-decoration:none;'
+                'font-size:13px;font-weight:700;">打不开时点这里</a>'
+                "</div></div>"
+            )
+        else:
+            lines.append(
+                '<div style="margin-top:12px;border:1px solid #e2e8f0;border-radius:9px;background:#fff;padding:9px 10px;'
+                'word-break:break-word;overflow-wrap:anywhere;">'
+                '<div style="font-size:12px;font-weight:800;color:#7c3aed;margin-bottom:4px;">视频素材</div>'
+                '<div style="font-size:14px;color:#475569;line-height:1.55;">这条带视频，微信内无法稳定内嵌播放。'
+                f'<a href="{safe_url}" style="color:#2563eb;text-decoration:none;font-weight:700;">点击打开视频</a></div>'
                 "</div>"
             )
     for card in _youtube_cards(post):
@@ -769,6 +780,11 @@ def _youtube_video_id(url: str) -> str:
         if match:
             return match.group(1)
     return ""
+
+
+def _is_direct_video_url(url: str) -> bool:
+    path = urlparse(str(url or "")).path.lower()
+    return path.endswith((".mp4", ".mov", ".m4v", ".webm"))
 
 
 def _plain_author(post: dict[str, Any]) -> str:
@@ -896,6 +912,7 @@ def _stored_post(post: dict[str, Any]) -> dict[str, Any]:
         "quote",
         "image_urls",
         "video_urls",
+        "video_cards",
         "link_cards",
         "youtube_cards",
         "avatar_url",

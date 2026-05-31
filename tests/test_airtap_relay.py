@@ -203,10 +203,16 @@ def test_airtap_posts_render_enriches_profiles_without_marking_seen(tmp_path, mo
     assert "https://x.com/" not in rendered["channels"]["wechat"]["content"]
     assert '<img src="/api/airtap/media/' in rendered["channels"]["wechat"]["content"]
     assert '<img src="https://airtap.ai/content/live/android-files/chart.png"' not in rendered["channels"]["wechat"]["content"]
+    assert "视频预览" in rendered["channels"]["wechat"]["content"]
+    assert "<video" in rendered["channels"]["wechat"]["content"]
+    assert "https://airtap.ai/content/live/android-files/clip.mp4" in rendered["channels"]["wechat"]["content"]
     assert "/api/airtap/avatars/" not in rendered["channels"]["wechat"]["content"]
     assert rendered["channels"]["xiaohongshu"]["format"] == "note"
     assert rendered["channels"]["xiaohongshu"]["title"] == "8小时市场观察：1条线索"
-    assert "我会这么看：" in rendered["channels"]["xiaohongshu"]["body"]
+    assert "AI分析：" in rendered["channels"]["xiaohongshu"]["body"]
+    assert "我会这么看：" not in rendered["channels"]["xiaohongshu"]["body"]
+    assert "这 8 小时我帮你" not in rendered["channels"]["xiaohongshu"]["body"]
+    assert "整体看下来" not in rendered["channels"]["xiaohongshu"]["body"]
     assert "NVDA keeps shipping <fast>." in rendered["channels"]["xiaohongshu"]["body"]
     assert "https://airtap.ai/content/live/android-files/chart.png" not in rendered["channels"]["xiaohongshu"]["body"]
 
