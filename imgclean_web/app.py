@@ -8,6 +8,7 @@ import uuid
 import hmac
 import base64
 import hashlib
+import html
 import inspect as pyinspect
 import io
 import json
@@ -35,7 +36,7 @@ from .airtap_relay import (
 from .billing import BillingNotConfigured, StripeBilling, UnknownCreditPack
 from .identity import Authenticator, User
 from .ledger import InsufficientCredits, LocalLedger, SupabaseLedger
-from .session import create_session_token, read_session_token
+from .session import InvalidSession, create_session_token, read_session_token
 from .storage import LocalStorage, R2Storage, SupabaseStorage
 from .watermark import WatermarkRequest, parse_watermark_box, remove_watermark_bytes
 
@@ -480,24 +481,69 @@ def create_app() -> FastAPI:
                 "channels": channels,
                 "airtap": {"ok": False, "reason": "no_posts"},
             }
-        airtap_task = await _create_airtap_xhs_task(settings, channels["xiaohongshu"], post_count=len(posts))
-        if airtap_task.get("ok"):
-            app.state.airtap_relay.record_dispatch(
-                "xiaohongshu",
-                dispatch_key,
-                {
-                    "post_count": len(posts),
-                    "taskId": airtap_task.get("taskId", ""),
-                    "taskState": airtap_task.get("taskState", ""),
-                },
-            )
+        confirm_token = _create_xhs_confirmation_token(settings, dispatch_key)
+        confirm_url = _xhs_confirmation_url(settings, request, confirm_token)
+        dispatch_record = app.state.airtap_relay.record_dispatch(
+            "xiaohongshu",
+            dispatch_key,
+            {
+                "status": "pending_confirmation",
+                "post_count": len(posts),
+                "xiaohongshu": channels["xiaohongshu"],
+                "confirm_url": confirm_url,
+            },
+        )
+        approval_channel = _render_xhs_approval_push(channels["xiaohongshu"], confirm_url, post_count=len(posts))
+        approval_push = await _send_pushplus(approval_channel, settings)
         return {
             "ok": True,
             "dispatch_key": dispatch_key,
             "post_count": len(posts),
             "channels": channels,
-            "airtap": airtap_task,
+            "approval": {
+                "status": dispatch_record.get("status"),
+                "confirm_url": confirm_url,
+            },
+            "approval_push": approval_push,
+            "airtap": {"ok": False, "reason": "awaiting_confirmation"},
         }
+
+    @app.get("/api/airtap/xhs/confirm", response_class=HTMLResponse)
+    async def airtap_xhs_confirm(token: str) -> HTMLResponse:
+        payload = _read_xhs_confirmation_token(settings, token)
+        dispatch_key = str(payload.get("dispatch_key") or "")
+        dispatch = app.state.airtap_relay.dispatch_status("xiaohongshu", dispatch_key)
+        if not dispatch:
+            raise HTTPException(status_code=404, detail="Xiaohongshu approval was not found.")
+        if dispatch.get("taskId"):
+            return HTMLResponse(_xhs_confirmation_page("已提交过", "这条小红书发布任务之前已经创建过了。"))
+        channel = dispatch.get("xiaohongshu")
+        if not isinstance(channel, dict):
+            raise HTTPException(status_code=409, detail="Xiaohongshu approval payload is incomplete.")
+        post_count = int(dispatch.get("post_count") or 0)
+        airtap_task = await _create_airtap_xhs_task(settings, channel, post_count=post_count)
+        if not airtap_task.get("ok"):
+            return HTMLResponse(
+                _xhs_confirmation_page("发布任务创建失败", str(airtap_task.get("message") or airtap_task.get("reason") or "")),
+                status_code=502,
+            )
+        app.state.airtap_relay.record_dispatch(
+            "xiaohongshu",
+            dispatch_key,
+            {
+                **dispatch,
+                "status": "task_created",
+                "taskId": airtap_task.get("taskId", ""),
+                "taskState": airtap_task.get("taskState", ""),
+                "confirmed_at": int(time.time()),
+            },
+        )
+        return HTMLResponse(
+            _xhs_confirmation_page(
+                "已创建小红书发布任务",
+                f"Airtap 任务已提交，任务 ID：{str(airtap_task.get('taskId') or '')}",
+            )
+        )
 
     @app.get("/api/auth/wechat/login")
     def wechat_login(request: Request, return_to: str = "") -> RedirectResponse:
@@ -1056,7 +1102,8 @@ async def _download_airtap_profile_avatars(profiles: list[Any]) -> list[dict[str
 
 async def _prepare_airtap_wechat_media(app: FastAPI, posts: list[dict[str, Any]], settings: WebSettings) -> None:
     urls: list[str] = []
-    for post in posts:
+    entries = _airtap_post_entries(posts)
+    for post in entries:
         avatar_url = str(post.get("avatar_url") or "").strip()
         if avatar_url:
             urls.append(avatar_url)
@@ -1070,7 +1117,7 @@ async def _prepare_airtap_wechat_media(app: FastAPI, posts: list[dict[str, Any]]
         for url in dict.fromkeys(urls):
             cache[url] = await _download_wechat_image_bytes(client, url)
 
-        for post in posts:
+        for post in entries:
             avatar_url = str(post.get("avatar_url") or "").strip()
             avatar_source = cache.get(avatar_url, b"")
             if avatar_source:
@@ -1125,6 +1172,18 @@ async def _prepare_airtap_wechat_media(app: FastAPI, posts: list[dict[str, Any]]
                     media_items.append({"url": str(url), "display_url": display_url})
             if media_items:
                 post["wechat_media_items"] = media_items
+
+
+def _airtap_post_entries(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    for post in posts:
+        if not isinstance(post, dict):
+            continue
+        entries.append(post)
+        quote = post.get("quote")
+        if isinstance(quote, dict):
+            entries.append(quote)
+    return entries
 
 
 async def _download_wechat_image_bytes(client: httpx.AsyncClient, url: str) -> bytes:
@@ -1329,7 +1388,8 @@ def _airtap_ai_prompt(posts: list[dict[str, Any]], channels: list[str]) -> str:
         "1. 保留作者、发布时间、原文重点、引用关系、图片和视频链接，不要遗漏。\n"
         "2. 非中文内容要翻译成自然中文；重要英文原句可保留在括号内。\n"
         "3. 小红书渠道返回适合作为笔记的标题、正文和标签，语气自然，不要营销腔。\n"
-        "4. 只输出 JSON，不要 Markdown。\n"
+        "4. 不要使用“我先说结论”“为什么值得看”这类模板话术；如果需要分析，直接写具体判断和依据。\n"
+        "5. 只输出 JSON，不要 Markdown。\n"
         f"需要生成的渠道：{', '.join(channels)}。\n"
         "帖子 JSON：\n"
         f"{json.dumps(posts, ensure_ascii=False)}"
@@ -1385,6 +1445,86 @@ async def _publish_airtap_channels(
         return pushes
     pushes["wechat"] = await _send_pushplus(channels["wechat"], settings)
     return pushes
+
+
+def _create_xhs_confirmation_token(settings: WebSettings, dispatch_key: str) -> str:
+    secret = _xhs_confirmation_secret(settings)
+    return create_session_token(
+        {"kind": "xhs_publish_confirmation", "dispatch_key": dispatch_key},
+        secret,
+        ttl_seconds=30 * 60 * 60,
+    )
+
+
+def _read_xhs_confirmation_token(settings: WebSettings, token: str) -> dict[str, Any]:
+    secret = _xhs_confirmation_secret(settings)
+    try:
+        payload = read_session_token(token, secret)
+    except InvalidSession as exc:
+        raise HTTPException(status_code=401, detail="Invalid Xiaohongshu confirmation token.") from exc
+    if payload.get("kind") != "xhs_publish_confirmation":
+        raise HTTPException(status_code=401, detail="Invalid Xiaohongshu confirmation token.")
+    return payload
+
+
+def _xhs_confirmation_secret(settings: WebSettings) -> str:
+    secret = settings.session_secret or settings.airtap_relay_secret or settings.cron_secret
+    if not secret:
+        raise HTTPException(status_code=503, detail="Xiaohongshu confirmation secret is not configured.")
+    return secret
+
+
+def _xhs_confirmation_url(settings: WebSettings, request: Request, token: str) -> str:
+    base_url = settings.api_base_url.rstrip("/") if settings.api_base_url else _external_base_url(request)
+    return f"{base_url}/api/airtap/xhs/confirm?token={quote(token)}"
+
+
+def _render_xhs_approval_push(channel: dict[str, Any], confirm_url: str, *, post_count: int) -> dict[str, Any]:
+    title = str(channel.get("title") or "小红书发布确认")
+    body = str(channel.get("body") or "")
+    hashtags = [str(tag).lstrip("#") for tag in channel.get("hashtags") or [] if str(tag).strip()]
+    hashtag_text = " ".join(f"#{html.escape(tag)}" for tag in hashtags)
+    content = (
+        '<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;'
+        'background:#f8fafc;padding:12px;box-sizing:border-box;">'
+        '<div style="padding:14px 16px;border-radius:10px;background:#111827;color:#fff;margin-bottom:12px;">'
+        '<div style="font-size:13px;color:#cbd5e1;">小红书发布前确认</div>'
+        f'<div style="font-size:20px;font-weight:800;line-height:1.35;margin-top:4px;">{html.escape(title)}</div>'
+        f'<div style="font-size:12px;color:#94a3b8;margin-top:4px;">这批内容来自最近 {post_count} 条已存 X 线索；确认后才会调用 Airtap 发布。</div>'
+        "</div>"
+        '<div style="background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:13px 14px;">'
+        '<div style="font-size:13px;font-weight:800;color:#0f766e;margin-bottom:6px;">笔记正文预览</div>'
+        f'<div style="white-space:pre-wrap;line-height:1.7;color:#111827;font-size:15px;word-break:break-word;overflow-wrap:anywhere;">{html.escape(body)}</div>'
+        f'<div style="font-size:13px;color:#475569;margin-top:10px;line-height:1.5;">{hashtag_text}</div>'
+        "</div>"
+        f'<a href="{html.escape(confirm_url)}" style="display:block;margin-top:12px;padding:13px 16px;'
+        'text-align:center;background:#2563eb;color:#fff;text-decoration:none;border-radius:9px;'
+        'font-size:16px;font-weight:800;">确认发布到小红书</a>'
+        '<div style="font-size:12px;color:#64748b;line-height:1.5;margin-top:8px;">'
+        "点确认后，后端会创建 Airtap 小红书发布任务；如果小红书登录失效，Airtap 会停在登录/验证页并回报。"
+        "</div></div>"
+    )
+    return {
+        "target": "pushplus",
+        "template": "html",
+        "title": f"小红书发布确认：{title}",
+        "content": content,
+    }
+
+
+def _xhs_confirmation_page(title: str, message: str) -> str:
+    return (
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        f"<title>{html.escape(title)}</title></head>"
+        '<body style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;background:#f8fafc;'
+        'color:#111827;padding:24px;">'
+        '<div style="max-width:560px;margin:0 auto;background:#fff;border:1px solid #e5e7eb;border-radius:12px;'
+        'padding:20px;">'
+        f'<h1 style="font-size:22px;line-height:1.35;margin:0 0 10px;">{html.escape(title)}</h1>'
+        f'<p style="font-size:15px;line-height:1.7;color:#475569;margin:0;">{html.escape(message)}</p>'
+        "</div></body></html>"
+    )
 
 
 async def _create_airtap_xhs_task(settings: WebSettings, channel: dict[str, Any], *, post_count: int) -> dict[str, Any]:

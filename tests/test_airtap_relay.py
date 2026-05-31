@@ -1,5 +1,6 @@
 import base64
 import io
+from urllib.parse import parse_qs, urlparse
 
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -194,8 +195,10 @@ def test_airtap_posts_render_enriches_profiles_without_marking_seen(tmp_path, mo
     assert "NVDA keeps shipping &lt;fast&gt;." in rendered["channels"]["wechat"]["content"]
     assert "<table" not in rendered["channels"]["wechat"]["content"]
     assert "1 小时信息整理" in rendered["channels"]["wechat"]["content"]
-    assert "我先说结论" in rendered["channels"]["wechat"]["content"]
-    assert "为什么值得看" in rendered["channels"]["wechat"]["content"]
+    assert "摘要" in rendered["channels"]["wechat"]["content"]
+    assert "AI分析" in rendered["channels"]["wechat"]["content"]
+    assert "我先说结论" not in rendered["channels"]["wechat"]["content"]
+    assert "为什么值得看" not in rendered["channels"]["wechat"]["content"]
     assert "原文链接" not in rendered["channels"]["wechat"]["content"]
     assert "https://x.com/" not in rendered["channels"]["wechat"]["content"]
     assert '<img src="/api/airtap/media/' in rendered["channels"]["wechat"]["content"]
@@ -249,8 +252,10 @@ def test_wechat_digest_uses_text_avatar_and_hides_source_links(tmp_path, monkeyp
     assert response.status_code == 200
     content = response.json()["channels"]["wechat"]["content"]
     assert "X 每小时摘要：2 条线索" in content
-    assert "我先说结论" in content
-    assert "为什么值得看" in content
+    assert "摘要" in content
+    assert "AI分析" in content
+    assert "我先说结论" not in content
+    assert "为什么值得看" not in content
     assert "Codex" not in content
     assert "Airtap" not in content
     assert "IP" in content
@@ -259,6 +264,91 @@ def test_wechat_digest_uses_text_avatar_and_hides_source_links(tmp_path, monkeyp
     assert "https://x.com/" not in content
     assert "炒股需要券商的根本原因是券商要报税" in content
     assert "下周重点关注这几个财报" in content
+
+
+def test_wechat_digest_enriches_quote_from_stored_history_and_profile(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    profile = client.post(
+        "/api/airtap/profiles/upsert",
+        headers={"x-airtap-secret": "relay-secret"},
+        json={"profiles": [{"display_name": "川沐｜Trumoo", "handle": "xiaomustock"}]},
+    )
+    history = client.post(
+        "/api/airtap/posts/publish",
+        headers={"x-airtap-secret": "relay-secret"},
+        json={
+            "scope": "x-hourly-wechat",
+            "channels": ["wechat"],
+            "posts": [
+                {
+                    "id": "2060000000000000000",
+                    "author_handle": "xiaomustock",
+                    "published_at": "2026年4月27日",
+                    "text": "海力士韩国开盘爆拉5%，等市场把存储股从周期股定为成长股。",
+                    "url": "https://x.com/xiaomustock/status/2060000000000000000",
+                }
+            ],
+        },
+    )
+
+    assert profile.status_code == 200
+    assert history.status_code == 200
+
+    response = client.post(
+        "/api/airtap/posts/render",
+        headers={"x-airtap-secret": "relay-secret"},
+        json={
+            "scope": "quote-history-preview",
+            "channels": ["wechat"],
+            "posts": [
+                {
+                    "id": "2061082495332794506",
+                    "author_handle": "xiaomustock",
+                    "published_at": "2026-05-31",
+                    "text": "HODL，$DRAM 坚持。",
+                    "url": "https://x.com/xiaomustock/status/2061082495332794506",
+                    "quote": {
+                        "url": "https://x.com/xiaomustock/status/2060000000000000000",
+                        "author_handle": "xiaomustock",
+                    },
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    content = response.json()["channels"]["wechat"]["content"]
+    assert "引用" in content
+    assert "川沐｜Trumoo" in content
+    assert "@xiaomustock" in content
+    assert "海力士韩国开盘爆拉5%" in content
+
+
+def test_wechat_digest_renders_youtube_preview_card(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/airtap/posts/render",
+        headers={"x-airtap-secret": "relay-secret"},
+        json={
+            "scope": "youtube-card-preview",
+            "channels": ["wechat"],
+            "posts": [
+                {
+                    "id": "tweet-youtube-1",
+                    "author_handle": "xiaomustock",
+                    "text": "这条引用了一个 YouTube 访谈 https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                    "url": "https://x.com/xiaomustock/status/2061",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    content = response.json()["channels"]["wechat"]["content"]
+    assert "YouTube 视频" in content
+    assert "i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg" in content
+    assert "https://www.youtube.com/watch?v=dQw4w9WgXcQ" in content
 
 
 def test_airtap_posts_infer_author_from_source_handle(tmp_path, monkeypatch):
@@ -598,7 +688,9 @@ def test_airtap_xhs_dispatch_skips_demo_hourly_posts(tmp_path, monkeypatch):
     assert "样式验证" not in payload["channels"]["xiaohongshu"]["body"]
 
 
-def test_airtap_xhs_dispatch_creates_publish_task_from_stored_posts(tmp_path, monkeypatch):
+def test_airtap_xhs_dispatch_pushes_note_preview_for_confirmation(tmp_path, monkeypatch):
+    monkeypatch.setenv("PUSHPLUS_TOKEN", "push-token")
+    monkeypatch.setenv("IMGCLEAN_SESSION_SECRET", "session-secret")
     monkeypatch.setenv("AIRTAP_PERSONAL_ACCESS_TOKEN", "airtap-token")
     calls = []
 
@@ -607,10 +699,10 @@ def test_airtap_xhs_dispatch_creates_publish_task_from_stored_posts(tmp_path, mo
             return None
 
         def json(self):
-            return {"taskId": "task-xhs-1", "taskState": "QUEUED"}
+            return {"code": 200, "msg": "执行成功", "data": "push-message-id"}
 
     class FakeAsyncClient:
-        def __init__(self, timeout):
+        def __init__(self, timeout, **kwargs):
             self.timeout = timeout
 
         async def __aenter__(self):
@@ -619,8 +711,8 @@ def test_airtap_xhs_dispatch_creates_publish_task_from_stored_posts(tmp_path, mo
         async def __aexit__(self, exc_type, exc, tb):
             return False
 
-        async def post(self, url, headers, json):
-            calls.append((url, headers, json))
+        async def post(self, url, headers=None, json=None, **kwargs):
+            calls.append((url, headers or {}, json or {}))
             return FakeResponse()
 
     monkeypatch.setattr("imgclean_web.app.httpx.AsyncClient", FakeAsyncClient)
@@ -641,19 +733,90 @@ def test_airtap_xhs_dispatch_creates_publish_task_from_stored_posts(tmp_path, mo
             ],
         },
     )
+    calls.clear()
 
     dispatch = client.get("/api/airtap/xhs/dispatch", headers={"x-airtap-secret": "relay-secret"})
     duplicate = client.get("/api/airtap/xhs/dispatch", headers={"x-airtap-secret": "relay-secret"})
 
     assert dispatch.status_code == 200
-    assert dispatch.json()["airtap"]["taskId"] == "task-xhs-1"
+    payload = dispatch.json()
+    assert payload["airtap"]["reason"] == "awaiting_confirmation"
+    assert payload["approval_push"]["ok"] is True
+    assert payload["approval"]["confirm_url"].startswith("http")
     assert duplicate.status_code == 200
     assert duplicate.json()["airtap"]["reason"] == "already_dispatched"
     assert len(calls) == 1
-    url, headers, payload = calls[0]
-    assert url == "https://airtap.ai/cortex/api/task/v1/taskCreate"
+    url, _headers, push_payload = calls[0]
+    assert url == "https://www.pushplus.plus/send"
+    assert "确认发布到小红书" in push_payload["content"]
+    assert payload["approval"]["confirm_url"] in push_payload["content"]
+    assert "下周重点关注这几个财报" in push_payload["content"]
+
+
+def test_airtap_xhs_confirmation_endpoint_creates_publish_task(tmp_path, monkeypatch):
+    monkeypatch.setenv("PUSHPLUS_TOKEN", "push-token")
+    monkeypatch.setenv("IMGCLEAN_SESSION_SECRET", "session-secret")
+    monkeypatch.setenv("AIRTAP_PERSONAL_ACCESS_TOKEN", "airtap-token")
+    calls = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._payload
+
+    class FakeAsyncClient:
+        def __init__(self, timeout, **kwargs):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, headers=None, json=None, **kwargs):
+            calls.append((url, headers or {}, json or {}))
+            if url == "https://www.pushplus.plus/send":
+                return FakeResponse({"code": 200, "msg": "执行成功", "data": "push-message-id"})
+            return FakeResponse({"taskId": "task-xhs-confirmed", "taskState": "QUEUED"})
+
+    monkeypatch.setattr("imgclean_web.app.httpx.AsyncClient", FakeAsyncClient)
+    client = _client(tmp_path, monkeypatch)
+    client.post(
+        "/api/airtap/posts/publish",
+        headers={"x-airtap-secret": "relay-secret"},
+        json={
+            "scope": "x-hourly-wechat",
+            "channels": ["wechat"],
+            "posts": [
+                {
+                    "id": "tweet-hourly-task-confirm-1",
+                    "author_handle": "ArtofSpecuycky",
+                    "text": "下周重点关注这几个财报。",
+                    "url": "https://x.com/ArtofSpecuycky/status/2061018073185091633",
+                }
+            ],
+        },
+    )
+    calls.clear()
+    dispatch = client.get("/api/airtap/xhs/dispatch", headers={"x-airtap-secret": "relay-secret"})
+    confirm_url = dispatch.json()["approval"]["confirm_url"]
+    token = parse_qs(urlparse(confirm_url).query)["token"][0]
+
+    confirmation = client.get(f"/api/airtap/xhs/confirm?token={token}")
+
+    assert confirmation.status_code == 200
+    assert "已创建小红书发布任务" in confirmation.text
+    assert any(call[0] == "https://airtap.ai/cortex/api/task/v1/taskCreate" for call in calls)
+    airtap_call = [call for call in calls if call[0] == "https://airtap.ai/cortex/api/task/v1/taskCreate"][0]
+    headers = airtap_call[1]
+    message = airtap_call[2]["userMessage"]["parts"][0]["text"]
     assert headers["Authorization"] == "Bearer airtap-token"
-    message = payload["userMessage"]["parts"][0]["text"]
     assert "Do not open X" in message
     assert "下周重点关注这几个财报" in message
     assert "relay-secret" not in message

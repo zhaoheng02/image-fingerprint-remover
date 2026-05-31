@@ -124,7 +124,8 @@ Collection rules:
 {_search_urls()}
 2. Collect posts from {zh_window}. Stop each account only after the visible feed is older than that time window.
 3. {sampling_rule}
-4. For every post, extract these raw fields exactly: id or canonical URL, author display name, author handle, relative/absolute publish time, original text, quote author/text when present, original post URL, image URLs, and video URLs.
+4. For every post, extract these raw fields exactly: id or canonical URL, author display name, author handle, relative/absolute publish time, original text, original post URL, image URLs, video URLs, and link cards.
+   If the post quotes/reposts another X post, open or expand the quoted post enough to capture the quoted post URL/id, author display name, handle, publish time, full visible text, image URLs, video URLs, and link cards. Do not send only the small collapsed quote stub.
 5. For avatars, use an already visible/easy profile avatar URL when available. Do not open image tabs or spend extra steps trying to obtain direct avatar URLs; omitting avatar_url is acceptable.
 6. Download or keep Airtap live URLs for images/videos when possible. Do not summarize posts in Airtap; the backend owns formatting, dedupe, WeChat delivery, and Xiaohongshu copy.
 7. Backend calls are a hard gate. Use Termux/curl or another reliable HTTP client on the cloud phone. Do not use browser page text as a substitute for an API response. Do not compose Xiaohongshu content yourself.
@@ -149,9 +150,10 @@ Collection rules:
          "published_at": "...",
          "text": "...",
          "url": "https://x.com/...",
-         "quote": {{"author_name":"...","text":"..."}},
+         "quote": {{"author_name":"...","author_handle":"...","published_at":"...","text":"...","url":"https://x.com/...","image_urls":["..."],"video_urls":["..."],"link_cards":[{{"provider":"youtube","title":"...","url":"https://www.youtube.com/watch?v=...","thumbnail_url":"..."}}]}},
          "image_urls": ["..."],
-         "video_urls": ["..."]
+         "video_urls": ["..."],
+         "link_cards": [{{"provider":"youtube","title":"...","url":"https://www.youtube.com/watch?v=...","thumbnail_url":"..."}}]
        }}
      ]
    }}
@@ -189,7 +191,7 @@ Every run:
 Use these X search URLs directly:
 {_search_urls()}
 
-For every post, extract: id/canonical URL, author display name, author handle, publish time, original text, quote author/text when present, original post URL, image URLs, and video URLs. Do not summarize inside Airtap; the backend owns formatting, dedupe, WeChat delivery, and Xiaohongshu copy.
+For every post, extract: id/canonical URL, author display name, author handle, publish time, original text, original post URL, image URLs, video URLs, and link cards. If there is a quoted X post, open/expand it and include quoted URL/id, quoted author display name, quoted handle, quoted publish time, full visible quoted text, quoted image/video URLs, and quoted link cards. For YouTube cards, include title, URL, and thumbnail URL when visible. Do not summarize inside Airtap; the backend owns formatting, dedupe, WeChat delivery, and Xiaohongshu copy.
 """
     )
 

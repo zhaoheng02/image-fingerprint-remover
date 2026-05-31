@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -282,6 +283,44 @@ class LocalAirtapRelayStore:
                 enriched["author_name"] = KNOWN_X_PROFILES[normalized_handle]
             if _is_missing_author(enriched.get("author_handle")):
                 enriched["author_handle"] = inferred_handle
+        quote = enriched.get("quote")
+        if isinstance(quote, dict):
+            enriched["quote"] = self._enrich_quote(state, quote)
+        return enriched
+
+    def _enrich_quote(self, state: dict[str, Any], quote: dict[str, Any]) -> dict[str, Any]:
+        enriched = dict(quote)
+        stored_post = _find_stored_post(state, enriched)
+        if stored_post:
+            for field in (
+                "id",
+                "author_name",
+                "author_handle",
+                "published_at",
+                "text",
+                "url",
+                "image_urls",
+                "video_urls",
+                "link_cards",
+                "youtube_cards",
+            ):
+                if _is_missing_post_value(enriched.get(field)) and not _is_missing_post_value(stored_post.get(field)):
+                    enriched[field] = stored_post[field]
+
+        inferred_handle = _infer_post_handle(enriched)
+        if inferred_handle and _is_missing_author(enriched.get("author_handle")):
+            enriched["author_handle"] = inferred_handle
+        profile = self._lookup_profile(
+            state,
+            str(enriched.get("author_handle") or enriched.get("author_name") or inferred_handle or ""),
+        )
+        if profile:
+            public_profile = self.public_profile(profile)
+            enriched["author_name"] = public_profile["display_name"]
+            enriched["author_handle"] = public_profile["handle"]
+            enriched["avatar_url"] = public_profile["avatar_url"]
+        elif inferred_handle and _is_missing_author(enriched.get("author_name")):
+            enriched["author_handle"] = inferred_handle
         return enriched
 
     def _read(self) -> dict[str, Any]:
@@ -459,7 +498,7 @@ def render_wechat_pushplus(posts: list[dict[str, Any]]) -> dict[str, Any]:
             'background:#111827;color:#fff;">'
             '<div style="font-size:13px;color:#cbd5e1;">1 小时信息整理</div>'
             f'<div style="font-size:20px;font-weight:800;line-height:1.35;margin-top:4px;">{html.escape(title)}</div>'
-            '<div style="font-size:12px;color:#94a3b8;margin-top:4px;">正文、引用和图片尽量直接展示；回溯信息只留在后台记录里。</div>'
+            '<div style="font-size:12px;color:#94a3b8;margin-top:4px;">正文、引用、图片和视频卡片尽量直接展示；回溯信息只留在后台记录里。</div>'
             "</div>"
             f"{lead}"
             + "".join(cards)
@@ -542,7 +581,7 @@ def _wechat_post_row(post: dict[str, Any]) -> str:
         "</div>"
         '<div style="margin-top:8px;padding:10px 12px;background:#fff7ed;border-radius:8px;'
         'border:1px solid #fed7aa;">'
-        '<div style="font-size:12px;font-weight:800;color:#9a3412;margin-bottom:4px;">为什么值得看</div>'
+        '<div style="font-size:12px;font-weight:800;color:#9a3412;margin-bottom:4px;">AI分析</div>'
         f'<div style="line-height:1.65;color:#431407;font-size:14px;word-break:break-word;overflow-wrap:anywhere;">{take}</div>'
         "</div>"
         f"{quote}{media}"
@@ -554,13 +593,37 @@ def _wechat_quote(post: dict[str, Any]) -> str:
     quote = post.get("quote") or {}
     if not isinstance(quote, dict) or not quote:
         return ""
-    author = html.escape(str(quote.get("author_name") or quote.get("author_handle") or "Quoted post"))
+    avatar = html.escape(str(quote.get("avatar_display_url") or quote.get("avatar_data_uri") or ""))
+    author_name, author_handle = _wechat_author_parts(quote)
+    author = html.escape(author_name or (f"@{author_handle}" if author_handle else "引用内容"))
+    handle = html.escape(f"@{author_handle}") if author_handle and author_handle.lower() not in author_name.lower() else ""
     text = html.escape(str(quote.get("text") or ""))
+    media = _wechat_media(quote)
+    avatar_cell = (
+        f'<img src="{avatar}" alt="" style="display:block;width:34px;height:34px;border-radius:50%;object-fit:cover;border:1px solid #bae6fd;">'
+        if avatar
+        else _wechat_text_avatar(author_name or author_handle)
+    )
+    text_block = (
+        f'<div style="white-space:pre-wrap;line-height:1.6;margin-top:6px;font-size:14px;">{text}</div>'
+        if text
+        else '<div style="line-height:1.6;margin-top:6px;font-size:14px;color:#64748b;">引用内容这次没有抓全；如果历史库里已有原帖，后端会自动补齐。</div>'
+    )
+    handle_line = (
+        f'<div style="font-size:12px;color:#64748b;line-height:1.35;word-break:break-all;overflow-wrap:anywhere;">{handle}</div>'
+        if handle
+        else ""
+    )
     return (
         '<div style="margin-top:12px;padding:10px 12px;border-left:4px solid #38bdf8;'
         'background:#f0f9ff;color:#334155;border-radius:8px;word-break:break-word;overflow-wrap:anywhere;">'
-        f'<div style="font-size:12px;font-weight:700;">引用：{author}</div>'
-        f'<div style="white-space:pre-wrap;line-height:1.6;margin-top:4px;">{text}</div>'
+        '<div style="min-height:36px;">'
+        f'<div style="float:left;margin-right:9px;">{avatar_cell}</div>'
+        f'<div style="font-size:13px;font-weight:800;line-height:1.35;">引用：{author}</div>'
+        f"{handle_line}"
+        '<div style="clear:both;"></div>'
+        "</div>"
+        f"{text_block}{media}"
         "</div>"
     )
 
@@ -615,9 +678,97 @@ def _wechat_media(post: dict[str, Any]) -> str:
                 '<span style="color:#475569;">已记录，发布小红书时优先使用本地下载素材。</span>'
                 "</div>"
             )
+    for card in _youtube_cards(post):
+        url = html.escape(str(card.get("url") or ""))
+        title = html.escape(str(card.get("title") or "YouTube 视频"))
+        thumbnail = html.escape(str(card.get("display_url") or card.get("thumbnail_url") or ""))
+        thumb = (
+            f'<img src="{thumbnail}" alt="YouTube 视频预览" style="display:block;width:100%;height:auto;max-width:100%;'
+            'border-radius:8px 8px 0 0;background:#111827;">'
+            if thumbnail
+            else ""
+        )
+        lines.append(
+            '<div style="margin-top:12px;border:1px solid #e2e8f0;border-radius:9px;background:#fff;overflow:hidden;">'
+            f'<a href="{url}" style="color:#0f172a;text-decoration:none;display:block;">'
+            f"{thumb}"
+            '<div style="padding:9px 10px;">'
+            '<div style="font-size:12px;font-weight:800;color:#dc2626;margin-bottom:3px;">YouTube 视频</div>'
+            f'<div style="font-size:14px;line-height:1.45;font-weight:700;word-break:break-word;overflow-wrap:anywhere;">{title}</div>'
+            '<div style="font-size:12px;color:#64748b;margin-top:4px;word-break:break-all;overflow-wrap:anywhere;">点击打开视频</div>'
+            "</div></a></div>"
+        )
     if not lines:
         return ""
     return '<div style="margin-top:12px;">' + "".join(lines) + "</div>"
+
+
+def _youtube_cards(post: dict[str, Any]) -> list[dict[str, str]]:
+    cards: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw_card in list(post.get("youtube_cards") or []) + list(post.get("link_cards") or []):
+        if not isinstance(raw_card, dict):
+            continue
+        url = str(raw_card.get("url") or raw_card.get("href") or "").strip()
+        video_id = _youtube_video_id(url)
+        provider = str(raw_card.get("provider") or raw_card.get("site") or "").lower()
+        if not video_id and "youtube" not in provider:
+            continue
+        key = video_id or url
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        thumbnail = str(raw_card.get("display_url") or raw_card.get("thumbnail_url") or raw_card.get("image_url") or "")
+        if not thumbnail and video_id:
+            thumbnail = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+        cards.append(
+            {
+                "url": url or (f"https://www.youtube.com/watch?v={video_id}" if video_id else ""),
+                "title": str(raw_card.get("title") or "YouTube 视频"),
+                "thumbnail_url": thumbnail,
+                "display_url": str(raw_card.get("display_url") or ""),
+            }
+        )
+
+    text_sources = [str(post.get("text") or ""), *[str(url) for url in post.get("video_urls") or []]]
+    for text in text_sources:
+        for url in _youtube_urls(text):
+            video_id = _youtube_video_id(url)
+            key = video_id or url
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            cards.append(
+                {
+                    "url": url,
+                    "title": "YouTube 视频",
+                    "thumbnail_url": f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg" if video_id else "",
+                    "display_url": "",
+                }
+            )
+    return cards
+
+
+def _youtube_urls(text: str) -> list[str]:
+    pattern = re.compile(
+        r"https?://(?:www\.)?(?:youtube\.com/(?:watch\?[^\s<>\"']*v=|shorts/|embed/)|youtu\.be/)[^\s<>\"']+",
+        re.IGNORECASE,
+    )
+    return [match.group(0).rstrip(").,，。；;") for match in pattern.finditer(str(text or ""))]
+
+
+def _youtube_video_id(url: str) -> str:
+    value = str(url or "")
+    patterns = (
+        r"[?&]v=([A-Za-z0-9_-]{6,})",
+        r"youtu\.be/([A-Za-z0-9_-]{6,})",
+        r"youtube\.com/(?:shorts|embed)/([A-Za-z0-9_-]{6,})",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, value, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return ""
 
 
 def _plain_author(post: dict[str, Any]) -> str:
@@ -655,12 +806,12 @@ def _wechat_digest_lead(posts: list[dict[str, Any]]) -> str:
         detail = "这批内容没有太长正文，先按作者和素材保留。"
     lead_text = (
         f"这 1 小时抓到 {len(posts)} 条新线索，主要来自 {author_text}。"
-        "我先按信息雷达处理：把正文放出来，再补一层为什么值得看。"
+        "我按信息雷达处理：先保留正文和引用，再补一层 AI 分析。"
     )
     return (
         '<div style="margin:10px 0;padding:12px 14px;background:#ecfeff;border:1px solid #a5f3fc;'
         'border-radius:10px;color:#164e63;box-sizing:border-box;">'
-        '<div style="font-size:13px;font-weight:800;margin-bottom:5px;">我先说结论</div>'
+        '<div style="font-size:13px;font-weight:800;margin-bottom:5px;">摘要</div>'
         f'<div style="font-size:14px;line-height:1.65;word-break:break-word;overflow-wrap:anywhere;">{html.escape(lead_text)}</div>'
         f'<div style="font-size:13px;line-height:1.6;margin-top:6px;color:#155e75;word-break:break-word;overflow-wrap:anywhere;">{html.escape(detail)}</div>'
         "</div>"
@@ -745,6 +896,8 @@ def _stored_post(post: dict[str, Any]) -> dict[str, Any]:
         "quote",
         "image_urls",
         "video_urls",
+        "link_cards",
+        "youtube_cards",
         "avatar_url",
     }
     return {key: value for key, value in post.items() if key in allowed}
@@ -757,6 +910,72 @@ def _has_dispatch_content(post: dict[str, Any]) -> bool:
     if isinstance(quote, dict) and str(quote.get("text") or "").strip():
         return True
     return bool(post.get("image_urls") or post.get("video_urls"))
+
+
+def _find_stored_post(state: dict[str, Any], needle: dict[str, Any]) -> dict[str, Any]:
+    needle_ids = _post_identity_values(needle)
+    if not needle_ids:
+        return {}
+    for posts in (state.get("seen_posts") or {}).values():
+        if not isinstance(posts, dict):
+            continue
+        for item in posts.values():
+            if not isinstance(item, dict):
+                continue
+            post = item.get("post") if isinstance(item.get("post"), dict) else item
+            if not isinstance(post, dict):
+                continue
+            if needle_ids & _post_identity_values(post):
+                return dict(post)
+    return {}
+
+
+def _post_identity_values(post: dict[str, Any]) -> set[str]:
+    values: set[str] = set()
+    for field in ("id", "url", "original_url", "source_url", "canonical_url", "quote_url"):
+        raw = str(post.get(field) or "").strip()
+        if not raw:
+            continue
+        values.add(raw)
+        normalized_url = _normalized_status_url(raw)
+        if normalized_url:
+            values.add(normalized_url)
+        status_id = _status_id_from_x_url(raw)
+        if status_id:
+            values.add(status_id)
+    return values
+
+
+def _normalized_status_url(url: str) -> str:
+    parsed = urlparse(str(url))
+    if parsed.scheme not in {"http", "https"} or parsed.netloc.lower() not in {
+        "x.com",
+        "www.x.com",
+        "twitter.com",
+        "www.twitter.com",
+    }:
+        return ""
+    parts = [part for part in parsed.path.split("/") if part]
+    if len(parts) < 3 or parts[1].lower() != "status":
+        return ""
+    return f"https://x.com/{parts[0]}/status/{parts[2]}"
+
+
+def _status_id_from_x_url(url: str) -> str:
+    normalized = _normalized_status_url(url)
+    if not normalized:
+        return ""
+    return normalized.rsplit("/", 1)[-1]
+
+
+def _is_missing_post_value(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, tuple, dict, set)):
+        return not value
+    return False
 
 
 def _is_demo_post(post: dict[str, Any]) -> bool:
