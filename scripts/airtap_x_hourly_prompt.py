@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print the Airtap prompt for the hourly X -> backend -> Xiaohongshu flow."""
+"""Print Airtap prompts for the X -> backend channel workflows."""
 from __future__ import annotations
 
 import argparse
@@ -25,7 +25,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--api-base", default="https://imgclean-api.vercel.app")
     parser.add_argument("--secret-file", default=str(DEFAULT_AUTH_FILE))
-    parser.add_argument("--dry-run", action="store_true", help="Tell Airtap to stop before final Xiaohongshu publish.")
+    parser.add_argument(
+        "--channel-plan",
+        choices=("wechat-hourly", "xhs-8h", "cloud-routine"),
+        default="wechat-hourly",
+        help="Which Airtap workflow prompt to print.",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Use render-only/draft-only validation instead of publishing.")
     parser.add_argument(
         "--xhs-smoke",
         action="store_true",
@@ -40,41 +46,71 @@ def main() -> None:
         _print_xhs_smoke_prompt(args.api_base.rstrip("/"), secret)
         return
 
-    final_publish = (
-        "After filling the Xiaohongshu title, body, hashtags, and attachable media, stop before tapping the final publish button. "
-        "Report the draft state and screenshots."
-        if args.dry_run
-        else "After filling the Xiaohongshu title, body, hashtags, and attachable media, publish the note through the Xiaohongshu app."
-    )
-    dry_run_safety = (
-        "DRY RUN SAFETY: Do not tap Publish, Post, Next, 下一步, 发布, or any final submission button. "
-        "If the Xiaohongshu editor shows only a final submission step, stop immediately and report the draft/editor state."
-        if args.dry_run
-        else ""
-    )
-    final_steps = (
-        f"""15. {dry_run_safety}
-16. {final_publish}
-17. Report the backend publish response summary, Xiaohongshu publish/draft result, and any blocked step. Never expose PushPlus token, OpenAI key, or the relay secret in the final report."""
-        if args.dry_run
-        else f"""15. {final_publish}
-16. Report the backend publish response summary, Xiaohongshu publish/draft result, and any blocked step. Never expose PushPlus token, OpenAI key, or the relay secret in the final report."""
-    )
-    sampling_rule = (
-        "Dry-run sampling limit: collect at most 1 qualifying post per account and at most 3 posts total. "
-        "If more qualifying posts are visible, report the count/handles you skipped because this was a dry-run validation."
-        if args.dry_run
-        else "Production collection limit: do not impose an artificial post cap. Stop each account only after the visible feed is older than the required time window."
-    )
-    search_urls = "\n".join(
+    api_base = args.api_base.rstrip("/")
+    if args.channel_plan == "cloud-routine":
+        _print_cloud_routine_prompt(api_base, secret, dry_run=args.dry_run)
+    elif args.channel_plan == "xhs-8h":
+        _print_channel_prompt(api_base, secret, channel_plan="xhs-8h", dry_run=args.dry_run)
+    else:
+        _print_channel_prompt(api_base, secret, channel_plan="wechat-hourly", dry_run=args.dry_run)
+
+
+def _search_urls() -> str:
+    return "\n".join(
         f"- {handle}: https://x.com/search?q=from%3A{handle}&src=typed_query&f=live" for handle in ACCOUNTS
     )
 
-    print(
-        f"""Hourly X monitor and channel publisher.
 
-Run on the cloud phone. Use Chrome for X and Xiaohongshu app for Xiaohongshu. Do not send anything to PushPlus yourself.
-{dry_run_safety}
+def _print_channel_prompt(api_base: str, secret: str, *, channel_plan: str, dry_run: bool) -> None:
+    is_wechat = channel_plan == "wechat-hourly"
+    channel = "wechat" if is_wechat else "xiaohongshu"
+    scope = "x-hourly-wechat" if is_wechat else "x-8h-xhs"
+    window_text = "past hour" if is_wechat else "past 8 hours"
+    zh_window = "过去 1 小时" if is_wechat else "过去 8 小时"
+    title = "Hourly X monitor for WeChat PushPlus" if is_wechat else "8-hour X digest for Xiaohongshu"
+    endpoint = "/api/airtap/posts/render" if dry_run else "/api/airtap/posts/publish"
+    call_kind = "render-only dry run" if dry_run else "publish"
+    sampling_rule = (
+        "Dry-run sampling limit: collect at most 1 qualifying post per account and at most 3 posts total. "
+        "If more qualifying posts are visible, report the count/handles you skipped because this was a dry-run validation."
+        if dry_run
+        else f"Production collection limit: do not impose an artificial post cap. Stop each account only after the visible feed is older than the {window_text} window."
+    )
+    xhs_steps = ""
+    if not is_wechat:
+        final_publish = (
+            "After filling the Xiaohongshu title, body, hashtags, and attachable media, stop before tapping the final publish button. "
+            "Report the draft state and screenshots."
+            if dry_run
+            else "After filling the Xiaohongshu title, body, hashtags, and attachable media, publish the note through the Xiaohongshu app."
+        )
+        dry_run_safety = (
+            "DRY RUN SAFETY: Do not tap Publish, Post, Next, 下一步, 发布, or any final submission button. "
+            "If the Xiaohongshu editor shows only a final submission step, stop immediately and report the draft/editor state."
+            if dry_run
+            else ""
+        )
+        xhs_steps = f"""
+13. If response.new_count is 0, stop. Do not open Xiaohongshu.
+14. If response.new_count is greater than 0, open Xiaohongshu and create a note using exactly:
+   - title: response.channels.xiaohongshu.title
+   - body: response.channels.xiaohongshu.body
+   - hashtags: response.channels.xiaohongshu.hashtags
+   - media: attach the collected local images/videos when the app allows it. Do not paste raw X links into the note body.
+15. {dry_run_safety}
+16. {final_publish}
+17. Report response.new_count, response.duplicate_count, channels.xiaohongshu.title, Xiaohongshu publish/draft result, and any blocked step. Never expose PushPlus token, OpenAI key, or the relay secret in the final report."""
+    else:
+        xhs_steps = """
+13. If response.new_count is 0, stop; there is nothing to push this hour.
+14. If response.new_count is greater than 0, the backend already handled WeChat PushPlus delivery. Do not open Xiaohongshu in this WeChat-only plan.
+15. Report response.new_count, response.duplicate_count, pushes.wechat.ok/reason, and any blocked step. Never expose PushPlus token, OpenAI key, or the relay secret in the final report."""
+
+    print(
+        f"""{title}.
+
+Run on the cloud phone. Use Chrome for X. Do not send anything to PushPlus yourself.
+This plan is {call_kind} for the {channel} channel only.
 
 Accounts to check on X:
 - xiaomustock
@@ -85,26 +121,26 @@ Accounts to check on X:
 
 Collection rules:
 1. Open these X search URLs directly in Chrome instead of navigating through home/profile pages:
-{search_urls}
-2. On the first run of the day, collect all posts from today. On later runs, collect only posts published in the past hour.
+{_search_urls()}
+2. Collect posts from {zh_window}. Stop each account only after the visible feed is older than that time window.
 3. {sampling_rule}
 4. For every post, extract these raw fields exactly: id or canonical URL, author display name, author handle, relative/absolute publish time, original text, quote author/text when present, original post URL, image URLs, and video URLs.
 5. For avatars, use an already visible/easy profile avatar URL when available. Do not open image tabs or spend extra steps trying to obtain direct avatar URLs; omitting avatar_url is acceptable.
-6. Download or keep Airtap live URLs for images/videos when possible. Do not summarize posts in Airtap; the backend owns formatting, dedupe, and WeChat delivery.
+6. Download or keep Airtap live URLs for images/videos when possible. Do not summarize posts in Airtap; the backend owns formatting, dedupe, WeChat delivery, and Xiaohongshu copy.
 7. Backend calls are a hard gate. Use Termux/curl or another reliable HTTP client on the cloud phone. Do not use browser page text as a substitute for an API response. Do not compose Xiaohongshu content yourself.
 8. Do not write huge JSON by typing it into the terminal manually. In Termux, use a Python heredoc like `python3 - <<'PY'` to create compact request JSON files, then call curl with `--data-binary @file.json`.
 9. For every account you visited, call `/api/airtap/profiles/upsert` with the display name and handle you observed, even when avatar_url is omitted:
-   POST {args.api_base.rstrip("/")}/api/airtap/profiles/upsert
+   POST {api_base}/api/airtap/profiles/upsert
    Headers: content-type: application/json, x-airtap-secret: {secret}
    Body: {{"profiles":[{{"display_name":"...","handle":"..."}}]}}
    This call must return HTTP 200 before you continue.
 10. Then call:
-   POST {args.api_base.rstrip("/")}/api/airtap/posts/publish
+   POST {api_base}{endpoint}
    Headers: content-type: application/json, x-airtap-secret: {secret}
    Body shape:
    {{
-     "scope": "x-hourly-watch",
-     "channels": ["wechat", "xiaohongshu"],
+     "scope": "{scope}",
+     "channels": ["{channel}"],
      "posts": [
        {{
          "id": "tweet id or URL",
@@ -119,15 +155,47 @@ Collection rules:
        }}
      ]
    }}
-11. The publish call must return HTTP 200 JSON. In your final report include the exact values of response.new_count, response.duplicate_count, pushes.wechat.ok/reason, and channels.xiaohongshu.title.
-12. If the backend response is missing, non-200, or cannot be parsed, stop and report the backend error. Do not open Xiaohongshu and do not generate local replacement copy.
-13. If response.new_count is 0, stop. WeChat will not be pushed and Xiaohongshu should not be posted.
-14. If response.new_count is greater than 0, WeChat has already been pushed by the backend. Open Xiaohongshu and create a note using exactly:
-   - title: response.channels.xiaohongshu.title
-   - body: response.channels.xiaohongshu.body
-   - hashtags: response.channels.xiaohongshu.hashtags
-   - media: attach the collected local images/videos when the app allows it; otherwise leave the media links in the body.
-{final_steps}
+11. The backend call must return HTTP 200 JSON. If the backend response is missing, non-200, or cannot be parsed, stop and report the backend error.
+12. Do not generate local replacement copy. For Xiaohongshu, use response.channels.xiaohongshu exactly; for WeChat, the backend already pushes.
+{xhs_steps}
+"""
+    )
+
+
+def _print_cloud_routine_prompt(api_base: str, secret: str, *, dry_run: bool) -> None:
+    endpoint = "/api/airtap/posts/render" if dry_run else "/api/airtap/posts/publish"
+    dry_note = (
+        "This is a dry-run validation: use render endpoints only and do not tap any Xiaohongshu final publish button."
+        if dry_run
+        else "This is production: WeChat is pushed by the backend; Xiaohongshu is published only on 8-hour boundary runs."
+    )
+    print(
+        f"""Cloud routine: X monitor with WeChat hourly and Xiaohongshu every 8 hours.
+
+Run this as the single Airtap cloud routine. The computer running Codex is not part of production execution.
+{dry_note}
+
+Every run:
+1. Determine current Asia/Shanghai time.
+2. Always execute the WeChat hourly plan:
+   - collect posts from the past hour for xiaomustock, hanking66, aleabitoreddit, IamRamenPanda, ArtofSpecuycky.
+   - call POST {api_base}/api/airtap/profiles/upsert for observed profiles.
+   - call POST {api_base}{endpoint} with scope "x-hourly-wechat", channels ["wechat"], and the collected posts.
+   - WeChat content must come from the backend. Do not push to PushPlus yourself and do not show raw X links as message body.
+3. If the current Asia/Shanghai hour is 00, 08, or 16, also execute the Xiaohongshu 8-hour plan:
+   - collect all qualifying posts from the past 8 hours for the same accounts.
+   - call POST {api_base}/api/airtap/profiles/upsert for observed profiles.
+   - call POST {api_base}{endpoint} with scope "x-8h-xhs", channels ["xiaohongshu"], and the collected posts.
+   - if response.new_count is greater than 0, open Xiaohongshu and create a note from response.channels.xiaohongshu.title/body/hashtags exactly.
+   - Xiaohongshu copy must be backend-generated: summarized, de-AI-flavored, and written in a human tone that borrows the cadence of the original posts without copying them raw.
+4. If the current hour is not 00, 08, or 16, do not open Xiaohongshu and do not post there.
+5. Backend calls are a hard gate. Use Termux/curl or another reliable HTTP client on the cloud phone. Do not use browser page text as a substitute for API JSON.
+6. Never expose PushPlus token, OpenAI key, or the relay secret in reports. The relay secret must only be sent as x-airtap-secret: {secret}.
+
+Use these X search URLs directly:
+{_search_urls()}
+
+For every post, extract: id/canonical URL, author display name, author handle, publish time, original text, quote author/text when present, original post URL, image URLs, and video URLs. Do not summarize inside Airtap; the backend owns formatting, dedupe, WeChat delivery, and Xiaohongshu copy.
 """
     )
 

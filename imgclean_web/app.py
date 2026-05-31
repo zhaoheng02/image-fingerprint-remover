@@ -1260,7 +1260,7 @@ def _normalize_ai_channels(payload: dict[str, Any], channels: list[str]) -> dict
         normalized["wechat"] = {
             "target": str(wechat.get("target") or "pushplus"),
             "template": str(wechat.get("template") or "html"),
-            "title": str(wechat.get("title") or "X 每小时更新"),
+            "title": str(wechat.get("title") or "X 每小时摘要"),
             "content": str(wechat.get("content") or ""),
         }
     if "xiaohongshu" in channels and isinstance(payload.get("xiaohongshu"), dict):
@@ -1268,7 +1268,7 @@ def _normalize_ai_channels(payload: dict[str, Any], channels: list[str]) -> dict
         hashtags = xhs.get("hashtags")
         normalized["xiaohongshu"] = {
             "format": str(xhs.get("format") or "note"),
-            "title": str(xhs.get("title") or "X 每小时更新"),
+            "title": str(xhs.get("title") or "8小时市场观察"),
             "body": str(xhs.get("body") or ""),
             "hashtags": [str(tag) for tag in hashtags] if isinstance(hashtags, list) else [],
         }
@@ -1296,7 +1296,7 @@ async def _publish_airtap_channels(
 async def _send_pushplus(channel: dict[str, Any], settings: WebSettings) -> dict[str, Any]:
     payload = {
         "token": settings.pushplus_token,
-        "title": str(channel.get("title") or "X 每小时更新"),
+        "title": str(channel.get("title") or "X 每小时摘要"),
         "content": str(channel.get("content") or ""),
         "template": str(channel.get("template") or "html"),
     }

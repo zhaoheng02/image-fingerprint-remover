@@ -373,7 +373,7 @@ class SupabaseAirtapRelayStore(LocalAirtapRelayStore):
 
 
 def render_wechat_pushplus(posts: list[dict[str, Any]]) -> dict[str, Any]:
-    title = f"X 每小时更新：{len(posts)} 条新内容" if posts else "X 每小时更新：暂无新内容"
+    title = f"X 每小时摘要：{len(posts)} 条线索" if posts else "X 每小时摘要：暂无新内容"
     if not posts:
         content = (
             '<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;'
@@ -382,16 +382,18 @@ def render_wechat_pushplus(posts: list[dict[str, Any]]) -> dict[str, Any]:
             "</div>"
         )
     else:
+        lead = _wechat_digest_lead(posts)
         cards = [_wechat_post_row(post) for post in posts]
         content = (
             '<div style="font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;'
             'background:#f8fafc;padding:10px;max-width:100%;box-sizing:border-box;">'
             '<div style="padding:14px 16px;margin-bottom:10px;border-radius:10px;'
             'background:#111827;color:#fff;">'
-            '<div style="font-size:13px;color:#cbd5e1;">Airtap 自动抓取 · Codex 内容整理</div>'
+            '<div style="font-size:13px;color:#cbd5e1;">1 小时信息整理 · Codex 编辑摘要</div>'
             f'<div style="font-size:20px;font-weight:800;line-height:1.35;margin-top:4px;">{html.escape(title)}</div>'
-            '<div style="font-size:12px;color:#94a3b8;margin-top:4px;">正文、引用和图片已直接整理在微信内；原文链接仅作备用。</div>'
+            '<div style="font-size:12px;color:#94a3b8;margin-top:4px;">正文、引用和图片尽量直接展示；回溯信息只留在后台记录里。</div>'
             "</div>"
+            f"{lead}"
             + "".join(cards)
             + "</div>"
         )
@@ -404,9 +406,9 @@ def render_wechat_pushplus(posts: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def render_xiaohongshu_note(posts: list[dict[str, Any]]) -> dict[str, Any]:
-    title = f"X 科技/美股快讯：{len(posts)} 条值得看" if posts else "X 科技/美股快讯：暂无新内容"
+    title = f"8小时市场观察：{len(posts)}条线索" if posts else "8小时市场观察：暂无新内容"
     if not posts:
-        body = "本小时暂无新内容。"
+        body = "这 8 小时暂无新内容。"
     else:
         sections = []
         for index, post in enumerate(posts, start=1):
@@ -414,22 +416,18 @@ def render_xiaohongshu_note(posts: list[dict[str, Any]]) -> dict[str, Any]:
                 "\n".join(
                     item
                     for item in [
-                        f"{index}. {_plain_author(post)}",
-                        f"发布时间：{post.get('published_at', '')}" if post.get("published_at") else "",
-                        "核心内容：",
-                        str(post.get("text") or "").strip(),
+                        f"{index}. {_plain_author(post)}提到：{_plain_text(post)}",
+                        f"我会这么看：{_editorial_take(post)}",
                         _plain_quote(post),
-                        _plain_media("图片素材", post.get("image_urls") or []),
-                        _plain_media("视频素材", post.get("video_urls") or []),
-                        f"原文链接：{post.get('url', '')}" if post.get("url") else "",
+                        "有图/视频素材，可以在发小红书时配上。" if (post.get("image_urls") or post.get("video_urls")) else "",
                     ]
                     if item
                 )
             )
         body = (
-            "这组内容来自 X 上几个科技/美股账号的最新动态，我做了去重和整理，方便快速扫重点。\n\n"
+            "这 8 小时我帮你把几个 X 账号的信息压了一遍。不是逐条搬运，主要看这些线索背后可能说明什么。\n\n"
             + "\n\n---\n\n".join(sections)
-            + "\n\n适合配图发布：优先使用原帖图片/视频素材，正文保留作者和原文链接，方便回溯。"
+            + "\n\n整体看下来，先当作信息雷达，不急着下结论；真正要交易还是回到财报、流动性和自己的仓位。"
         )
     return {
         "format": "note",
@@ -441,14 +439,14 @@ def render_xiaohongshu_note(posts: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _wechat_post_row(post: dict[str, Any]) -> str:
     avatar = html.escape(str(post.get("avatar_display_url") or post.get("avatar_data_uri") or ""))
+    author_name, author_handle = _wechat_author_parts(post)
     avatar_cell = (
         f'<img src="{avatar}" alt="" style="display:block;width:42px;height:42px;border-radius:50%;object-fit:cover;border:1px solid #e5e7eb;">'
         if avatar
-        else '<div style="width:42px;height:42px;border-radius:50%;background:#dbeafe;"></div>'
+        else _wechat_text_avatar(author_name or author_handle)
     )
     media = _wechat_media(post)
     quote = _wechat_quote(post)
-    author_name, author_handle = _wechat_author_parts(post)
     author = html.escape(author_name)
     handle = html.escape(f"@{author_handle}") if author_handle else ""
     handle_line = (
@@ -458,14 +456,7 @@ def _wechat_post_row(post: dict[str, Any]) -> str:
     )
     time_text = html.escape(str(post.get("published_at") or ""))
     text = html.escape(str(post.get("text") or ""))
-    url = html.escape(str(post.get("url") or ""))
-    source = (
-        '<div style="margin-top:12px;padding:8px 10px;background:#f8fafc;border-radius:8px;'
-        'font-size:12px;line-height:1.5;color:#64748b;word-break:break-all;overflow-wrap:anywhere;">'
-        f"原文链接（备用）：{url}</div>"
-        if url
-        else ""
-    )
+    take = html.escape(_editorial_take(post))
     return (
         '<div style="margin:10px 0;padding:14px;background:#fff;border:1px solid #e5e7eb;'
         'border-radius:10px;max-width:100%;box-sizing:border-box;overflow:hidden;">'
@@ -476,8 +467,17 @@ def _wechat_post_row(post: dict[str, Any]) -> str:
         f'<div style="font-size:12px;color:#64748b;margin-top:2px;line-height:1.35;">{time_text}</div>'
         '<div style="clear:both;"></div>'
         "</div>"
+        '<div style="margin-top:8px;padding:10px 12px;background:#f8fafc;border-radius:8px;'
+        'border:1px solid #e2e8f0;">'
+        '<div style="font-size:12px;font-weight:800;color:#0f766e;margin-bottom:4px;">这条在说什么</div>'
         f'<div style="white-space:pre-wrap;line-height:1.7;color:#111827;font-size:15px;word-break:break-word;overflow-wrap:anywhere;">{text}</div>'
-        f"{quote}{media}{source}"
+        "</div>"
+        '<div style="margin-top:8px;padding:10px 12px;background:#fff7ed;border-radius:8px;'
+        'border:1px solid #fed7aa;">'
+        '<div style="font-size:12px;font-weight:800;color:#9a3412;margin-bottom:4px;">为什么值得看</div>'
+        f'<div style="line-height:1.65;color:#431407;font-size:14px;word-break:break-word;overflow-wrap:anywhere;">{take}</div>'
+        "</div>"
+        f"{quote}{media}"
         "</div>"
     )
 
@@ -531,22 +531,20 @@ def _wechat_media(post: dict[str, Any]) -> str:
         remaining_image_urls = remaining_image_urls[len(image_data_uris):]
 
     for url in remaining_image_urls:
-        safe_url = html.escape(str(url))
         lines.append(
             '<div style="margin-top:6px;padding:8px 10px;background:#f8fafc;border-radius:8px;'
             'border:1px solid #e2e8f0;word-break:break-all;overflow-wrap:anywhere;">'
-            f'<span style="font-weight:700;color:#0f172a;">图片素材</span>：'
-            f'<span style="color:#475569;">{safe_url}</span>'
+            '<span style="font-weight:700;color:#0f172a;">图片素材</span>：'
+            '<span style="color:#475569;">已记录，未能稳定内嵌时不在微信里展示外链。</span>'
             "</div>"
         )
     for label, urls in (("视频素材", post.get("video_urls") or []),):
-        for url in urls:
-            safe_url = html.escape(str(url))
+        for _url in urls:
             lines.append(
                 '<div style="margin-top:6px;padding:8px 10px;background:#f8fafc;border-radius:8px;'
                 'border:1px solid #e2e8f0;word-break:break-all;overflow-wrap:anywhere;">'
                 f'<span style="font-weight:700;color:#0f172a;">{html.escape(label)}</span>：'
-                f'<span style="color:#475569;">{safe_url}</span>'
+                '<span style="color:#475569;">已记录，发布小红书时优先使用本地下载素材。</span>'
                 "</div>"
             )
     if not lines:
@@ -568,6 +566,90 @@ def _wechat_author_parts(post: dict[str, Any]) -> tuple[str, str]:
     if handle and handle.lower() in author.lower():
         return author, ""
     return author, handle
+
+
+def _wechat_digest_lead(posts: list[dict[str, Any]]) -> str:
+    author_names = []
+    for post in posts:
+        author = _wechat_author_parts(post)[0]
+        if author and author not in author_names:
+            author_names.append(author)
+    author_text = "、".join(author_names[:3])
+    if len(author_names) > 3:
+        author_text += f" 等 {len(author_names)} 个账号"
+    elif not author_text:
+        author_text = "几个账号"
+
+    snippets = [_short_text(_plain_text(post), 42) for post in posts[:3] if _plain_text(post)]
+    if snippets:
+        detail = "；".join(snippets)
+    else:
+        detail = "这批内容没有太长正文，先按作者和素材保留。"
+    lead_text = (
+        f"这 1 小时抓到 {len(posts)} 条新线索，主要来自 {author_text}。"
+        "我先按信息雷达处理：把正文放出来，再补一层为什么值得看。"
+    )
+    return (
+        '<div style="margin:10px 0;padding:12px 14px;background:#ecfeff;border:1px solid #a5f3fc;'
+        'border-radius:10px;color:#164e63;box-sizing:border-box;">'
+        '<div style="font-size:13px;font-weight:800;margin-bottom:5px;">我先说结论</div>'
+        f'<div style="font-size:14px;line-height:1.65;word-break:break-word;overflow-wrap:anywhere;">{html.escape(lead_text)}</div>'
+        f'<div style="font-size:13px;line-height:1.6;margin-top:6px;color:#155e75;word-break:break-word;overflow-wrap:anywhere;">{html.escape(detail)}</div>'
+        "</div>"
+    )
+
+
+def _wechat_text_avatar(name: str) -> str:
+    initials = html.escape(_initials(name))
+    return (
+        '<div style="width:42px;height:42px;border-radius:50%;background:#dbeafe;'
+        'border:1px solid #bfdbfe;color:#1d4ed8;font-weight:800;font-size:13px;'
+        'line-height:42px;text-align:center;letter-spacing:0;">'
+        f"{initials}</div>"
+    )
+
+
+def _initials(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9\u4e00-\u9fff]+", " ", str(value or "")).strip()
+    if not cleaned:
+        return "X"
+    ascii_letters = re.sub(r"[^A-Za-z]", "", cleaned)
+    uppercase_letters = re.findall(r"[A-Z]", ascii_letters)
+    if len(uppercase_letters) >= 2:
+        return (uppercase_letters[0] + uppercase_letters[-1]).upper()
+    words = [word for word in cleaned.split() if word]
+    if len(words) >= 2:
+        return (words[0][0] + words[1][0]).upper()
+    if ascii_letters:
+        return ascii_letters[:2].upper()
+    return cleaned[:2]
+
+
+def _plain_text(post: dict[str, Any]) -> str:
+    text = str(post.get("text") or "").strip()
+    return re.sub(r"\s+", " ", text)
+
+
+def _short_text(text: str, limit: int = 80) -> str:
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: max(0, limit - 1)].rstrip() + "..."
+
+
+def _editorial_take(post: dict[str, Any]) -> str:
+    text = f"{post.get('text') or ''} {json.dumps(post.get('quote') or {}, ensure_ascii=False)}".lower()
+    if any(keyword in text for keyword in ("财报", "earnings", "guidance", "revenue")):
+        return "这类信息适合先放进财报日历里看，重点不是标题本身，而是预期差和盘后的反应。"
+    if any(keyword in text for keyword in ("券商", "报税", "broker", "tax")):
+        return "这提醒的是交易基础设施问题。很多看似简单的交易动作，背后其实连着清算、合规和税务。"
+    if any(keyword in text for keyword in ("nvda", "gpu", "ai", "算力", "数据中心", "datacenter", "data center")):
+        return "这条不只是在说单个公司，更像是在看算力链条里哪些环节正在被重新定价。"
+    if any(keyword in text for keyword in ("sec", "fed", "rate", "inflation", "利率", "通胀")):
+        return "这类宏观/监管线索不用急着下结论，先看它会不会影响资金风险偏好和仓位变化。"
+    if post.get("image_urls") or post.get("video_urls"):
+        return "这条带素材，适合回看图表或视频里的原始信息，先看证据再看结论。"
+    return "我会先把它当作一个观察点，等后续有没有更多账号、数据或市场反应来验证。"
 
 
 def _plain_quote(post: dict[str, Any]) -> str:

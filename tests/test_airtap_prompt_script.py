@@ -30,22 +30,50 @@ def test_xhs_smoke_prompt_renders_backend_only_draft_flow():
     assert "Never expose PushPlus token, OpenAI key, or the relay secret" in prompt
 
 
-def test_hourly_dry_run_prompt_uses_bounded_x_search_flow():
+def test_wechat_hourly_prompt_uses_bounded_x_search_flow():
     prompt = _run_prompt("--dry-run")
 
     assert "https://x.com/search?q=from%3Axiaomustock" in prompt
     assert "https://x.com/search?q=from%3Ahanking66" in prompt
+    assert "Hourly X monitor for WeChat PushPlus" in prompt
+    assert "/api/airtap/posts/render" in prompt
+    assert '"scope": "x-hourly-wechat"' in prompt
+    assert '"channels": ["wechat"]' in prompt
+    assert "过去 1 小时" in prompt
     assert "Dry-run sampling limit" in prompt
     assert "at most 1 qualifying post per account" in prompt
-    assert "DRY RUN SAFETY" in prompt
-    assert "Do not tap Publish, Post, Next, 下一步, 发布, or any final submission button" in prompt
     assert "Do not write huge JSON by typing it into the terminal manually" in prompt
     assert "python3 - <<'PY'" in prompt
+    assert '"channels": ["wechat", "xiaohongshu"]' not in prompt
 
 
-def test_hourly_production_prompt_has_no_empty_dry_run_step():
+def test_wechat_production_prompt_has_no_xiaohongshu_publish_step():
     prompt = _run_prompt()
 
     assert "DRY RUN SAFETY" not in prompt
     assert "\n15. \n" not in prompt
+    assert "/api/airtap/posts/publish" in prompt
+    assert '"scope": "x-hourly-wechat"' in prompt
+    assert '"channels": ["wechat"]' in prompt
+    assert "Do not open Xiaohongshu in this WeChat-only plan" in prompt
+
+
+def test_xhs_8h_prompt_uses_separate_scope_and_human_summary_direction():
+    prompt = _run_prompt("--channel-plan", "xhs-8h")
+
+    assert "8-hour X digest for Xiaohongshu" in prompt
+    assert "过去 8 小时" in prompt
+    assert '"scope": "x-8h-xhs"' in prompt
+    assert '"channels": ["xiaohongshu"]' in prompt
+    assert "Do not paste raw X links into the note body" in prompt
     assert "publish the note through the Xiaohongshu app" in prompt
+
+
+def test_cloud_routine_prompt_keeps_server_side_schedule_clear():
+    prompt = _run_prompt("--channel-plan", "cloud-routine")
+
+    assert "single Airtap cloud routine" in prompt
+    assert "computer running Codex is not part of production execution" in prompt
+    assert 'scope "x-hourly-wechat", channels ["wechat"]' in prompt
+    assert 'scope "x-8h-xhs", channels ["xiaohongshu"]' in prompt
+    assert "current Asia/Shanghai hour is 00, 08, or 16" in prompt

@@ -193,16 +193,19 @@ def test_airtap_posts_render_enriches_profiles_without_marking_seen(tmp_path, mo
     assert "xiao mu" in rendered["channels"]["wechat"]["content"]
     assert "NVDA keeps shipping &lt;fast&gt;." in rendered["channels"]["wechat"]["content"]
     assert "<table" not in rendered["channels"]["wechat"]["content"]
-    assert "Airtap 自动抓取" in rendered["channels"]["wechat"]["content"]
-    assert "原文链接（备用）" in rendered["channels"]["wechat"]["content"]
+    assert "1 小时信息整理" in rendered["channels"]["wechat"]["content"]
+    assert "我先说结论" in rendered["channels"]["wechat"]["content"]
+    assert "为什么值得看" in rendered["channels"]["wechat"]["content"]
+    assert "原文链接" not in rendered["channels"]["wechat"]["content"]
+    assert "https://x.com/" not in rendered["channels"]["wechat"]["content"]
     assert '<img src="/api/airtap/media/' in rendered["channels"]["wechat"]["content"]
     assert '<img src="https://airtap.ai/content/live/android-files/chart.png"' not in rendered["channels"]["wechat"]["content"]
     assert "/api/airtap/avatars/" not in rendered["channels"]["wechat"]["content"]
     assert rendered["channels"]["xiaohongshu"]["format"] == "note"
-    assert rendered["channels"]["xiaohongshu"]["title"] == "X 科技/美股快讯：1 条值得看"
-    assert "核心内容：" in rendered["channels"]["xiaohongshu"]["body"]
+    assert rendered["channels"]["xiaohongshu"]["title"] == "8小时市场观察：1条线索"
+    assert "我会这么看：" in rendered["channels"]["xiaohongshu"]["body"]
     assert "NVDA keeps shipping <fast>." in rendered["channels"]["xiaohongshu"]["body"]
-    assert "https://airtap.ai/content/live/android-files/chart.png" in rendered["channels"]["xiaohongshu"]["body"]
+    assert "https://airtap.ai/content/live/android-files/chart.png" not in rendered["channels"]["xiaohongshu"]["body"]
 
     second_preview = client.post(
         "/api/airtap/posts/render",
@@ -213,6 +216,47 @@ def test_airtap_posts_render_enriches_profiles_without_marking_seen(tmp_path, mo
     assert second_preview.status_code == 200
     assert second_preview.json()["new_count"] == 1
     assert second_preview.json()["duplicate_count"] == 0
+
+
+def test_wechat_digest_uses_text_avatar_and_hides_source_links(tmp_path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+
+    response = client.post(
+        "/api/airtap/posts/render",
+        headers={"x-airtap-secret": "relay-secret"},
+        json={
+            "scope": "wechat-digest",
+            "channels": ["wechat"],
+            "posts": [
+                {
+                    "id": "tweet-no-avatar-1",
+                    "author_name": "IamRamenPanda",
+                    "published_at": "3h ago",
+                    "text": "炒股需要券商的根本原因是券商要报税",
+                    "url": "https://x.com/IamRamenPanda/status/2060993144800625145",
+                },
+                {
+                    "id": "tweet-no-avatar-2",
+                    "author_name": "ArtofSpecuycky",
+                    "published_at": "2h ago",
+                    "text": "下周重点关注这几个财报",
+                    "url": "https://x.com/ArtofSpecuycky/status/2061018073185091633",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    content = response.json()["channels"]["wechat"]["content"]
+    assert "X 每小时摘要：2 条线索" in content
+    assert "我先说结论" in content
+    assert "为什么值得看" in content
+    assert "IP" in content
+    assert "AS" in content
+    assert "原文链接" not in content
+    assert "https://x.com/" not in content
+    assert "炒股需要券商的根本原因是券商要报税" in content
+    assert "下周重点关注这几个财报" in content
 
 
 def test_airtap_posts_render_hosts_avatar_and_media_separately(tmp_path, monkeypatch):
@@ -530,7 +574,7 @@ def test_airtap_posts_render_uses_ai_composer_when_configured(tmp_path, monkeypa
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["channels"]["wechat"]["title"] == "X 每小时更新：1 条新内容"
+    assert payload["channels"]["wechat"]["title"] == "X 每小时摘要：1 条线索"
     assert "<table" not in payload["channels"]["wechat"]["content"]
     assert payload["channels"]["xiaohongshu"]["title"] == "AI小红书标题"
     assert payload["channels"]["xiaohongshu"]["body"] == "AI小红书正文"
