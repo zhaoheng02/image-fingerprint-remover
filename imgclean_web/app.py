@@ -480,7 +480,12 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/api/airtap/xhs/dispatch")
-    async def airtap_xhs_dispatch(request: Request, dry_run: bool = False, hours: int = 8) -> dict[str, Any]:
+    async def airtap_xhs_dispatch(
+        request: Request,
+        dry_run: bool = False,
+        hours: int = 8,
+        fail_on_push_error: bool = False,
+    ) -> dict[str, Any]:
         _require_airtap_or_cron_secret(request, settings)
         safe_hours = min(max(hours, 1), 24)
         dispatch_key = _xhs_dispatch_key(safe_hours)
@@ -494,6 +499,41 @@ def create_app() -> FastAPI:
         if ai_channels:
             channels = {**channels, **ai_channels}
         if existing_dispatch:
+            if not _xhs_approval_push_delivered(existing_dispatch):
+                confirm_url = str(existing_dispatch.get("confirm_url") or "")
+                if not confirm_url:
+                    confirm_token = _create_xhs_confirmation_token(settings, dispatch_key)
+                    confirm_url = _xhs_confirmation_url(settings, request, confirm_token)
+                channel = existing_dispatch.get("xiaohongshu") if isinstance(existing_dispatch.get("xiaohongshu"), dict) else channels["xiaohongshu"]
+                post_count = int(existing_dispatch.get("post_count") or len(posts))
+                approval_channel = _render_xhs_approval_push(channel, confirm_url, post_count=post_count)
+                approval_push = await _send_pushplus(approval_channel, settings)
+                retry_record = app.state.airtap_relay.record_dispatch(
+                    "xiaohongshu",
+                    dispatch_key,
+                    {
+                        **existing_dispatch,
+                        "status": "pending_confirmation" if approval_push.get("ok") else "approval_push_failed",
+                        "confirm_url": confirm_url,
+                        "approval_push": approval_push,
+                        **({"approval_pushed_at": int(time.time())} if approval_push.get("ok") else {}),
+                    },
+                )
+                if fail_on_push_error and not approval_push.get("ok"):
+                    raise HTTPException(status_code=502, detail="Xiaohongshu approval PushPlus delivery failed.")
+                return {
+                    "ok": True,
+                    "dispatch_key": dispatch_key,
+                    "post_count": post_count,
+                    "channels": {"xiaohongshu": channel},
+                    "approval": {
+                        "status": retry_record.get("status"),
+                        "confirm_url": confirm_url,
+                        "retried": True,
+                    },
+                    "approval_push": approval_push,
+                    "airtap": {"ok": False, "reason": "awaiting_confirmation" if approval_push.get("ok") else "approval_push_failed"},
+                }
             return {
                 "ok": True,
                 "dispatch_key": dispatch_key,
@@ -536,6 +576,18 @@ def create_app() -> FastAPI:
         )
         approval_channel = _render_xhs_approval_push(channels["xiaohongshu"], confirm_url, post_count=len(posts))
         approval_push = await _send_pushplus(approval_channel, settings)
+        dispatch_record = app.state.airtap_relay.record_dispatch(
+            "xiaohongshu",
+            dispatch_key,
+            {
+                **dispatch_record,
+                "status": "pending_confirmation" if approval_push.get("ok") else "approval_push_failed",
+                "approval_push": approval_push,
+                **({"approval_pushed_at": int(time.time())} if approval_push.get("ok") else {}),
+            },
+        )
+        if fail_on_push_error and not approval_push.get("ok"):
+            raise HTTPException(status_code=502, detail="Xiaohongshu approval PushPlus delivery failed.")
         return {
             "ok": True,
             "dispatch_key": dispatch_key,
@@ -546,7 +598,7 @@ def create_app() -> FastAPI:
                 "confirm_url": confirm_url,
             },
             "approval_push": approval_push,
-            "airtap": {"ok": False, "reason": "awaiting_confirmation"},
+            "airtap": {"ok": False, "reason": "awaiting_confirmation" if approval_push.get("ok") else "approval_push_failed"},
         }
 
     @app.get("/api/airtap/xhs/confirm", response_class=HTMLResponse)
@@ -1740,6 +1792,13 @@ def _xhs_confirmation_url(settings: WebSettings, request: Request, token: str) -
     return f"{base_url}/api/airtap/xhs/confirm?token={quote(token)}"
 
 
+def _xhs_approval_push_delivered(dispatch: dict[str, Any]) -> bool:
+    if dispatch.get("approval_pushed_at"):
+        return True
+    approval_push = dispatch.get("approval_push")
+    return isinstance(approval_push, dict) and approval_push.get("ok") is True
+
+
 def _render_xhs_approval_push(channel: dict[str, Any], confirm_url: str, *, post_count: int) -> dict[str, Any]:
     title = str(channel.get("title") or "小红书发布确认")
     body = str(channel.get("body") or "")
@@ -1853,25 +1912,48 @@ async def _send_pushplus(channel: dict[str, Any], settings: WebSettings) -> dict
     }
     if settings.pushplus_topic:
         payload["topic"] = settings.pushplus_topic
+    endpoints = _pushplus_endpoints(settings.pushplus_endpoint)
+    last_error = ""
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(
-                settings.pushplus_endpoint,
-                headers={"content-type": "application/json"},
-                json=payload,
-            )
-            response.raise_for_status()
-            body = response.json()
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30, connect=10)) as client:
+            for attempt in range(1, 4):
+                for endpoint in endpoints:
+                    try:
+                        response = await client.post(
+                            endpoint,
+                            headers={"content-type": "application/json"},
+                            json=payload,
+                        )
+                        response.raise_for_status()
+                        body = response.json()
+                    except Exception as exc:
+                        last_error = str(exc)
+                        continue
+                    code = body.get("code")
+                    return {
+                        "ok": code in {200, "200"},
+                        "provider": "pushplus",
+                        "code": code,
+                        "message": body.get("msg") or body.get("message") or "",
+                        "provider_message_id": body.get("data"),
+                        "attempts": attempt,
+                        "endpoint": endpoint,
+                    }
+                await asyncio.sleep(0.8 * attempt)
     except Exception as exc:
-        return {"ok": False, "provider": "pushplus", "reason": "pushplus_request_failed", "message": str(exc)}
-    code = body.get("code")
-    return {
-        "ok": code in {200, "200"},
-        "provider": "pushplus",
-        "code": code,
-        "message": body.get("msg") or body.get("message") or "",
-        "provider_message_id": body.get("data"),
-    }
+        last_error = str(exc)
+    return {"ok": False, "provider": "pushplus", "reason": "pushplus_request_failed", "message": last_error}
+
+
+def _pushplus_endpoints(primary_endpoint: str) -> list[str]:
+    endpoint = primary_endpoint or "https://www.pushplus.plus/send"
+    endpoints = [endpoint]
+    parsed = urlparse(endpoint)
+    if parsed.netloc == "www.pushplus.plus":
+        endpoints.append(endpoint.replace("https://www.pushplus.plus", "https://pushplus.plus", 1))
+    elif parsed.netloc == "pushplus.plus":
+        endpoints.append(endpoint.replace("https://pushplus.plus", "https://www.pushplus.plus", 1))
+    return list(dict.fromkeys(endpoints))
 
 
 def _verify_stripe_signature(body: bytes, signature_header: str, secret: str, tolerance_seconds: int = 300) -> None:

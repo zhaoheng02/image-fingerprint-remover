@@ -16,4 +16,4 @@ jobs:
           test -n "$X_AIRTAP_RELAY_SECRET"
           curl --fail-with-body --show-error --silent \
             -H "x-airtap-secret: $X_AIRTAP_RELAY_SECRET" \
-            "https://imgclean-api.vercel.app/api/airtap/xhs/dispatch"
+            "https://imgclean-api.vercel.app/api/airtap/xhs/dispatch?fail_on_push_error=true"

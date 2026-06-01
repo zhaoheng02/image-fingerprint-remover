@@ -1000,6 +1000,115 @@ def test_airtap_xhs_dispatch_pushes_note_preview_for_confirmation(tmp_path, monk
     assert "下周重点关注这几个财报" in push_payload["content"]
 
 
+def test_airtap_xhs_dispatch_retries_failed_approval_push(tmp_path, monkeypatch):
+    monkeypatch.setenv("PUSHPLUS_TOKEN", "push-token")
+    monkeypatch.setenv("IMGCLEAN_SESSION_SECRET", "session-secret")
+    async def fake_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr("imgclean_web.app.asyncio.sleep", fake_sleep)
+    calls = []
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"code": 200, "msg": "执行成功", "data": "push-message-id"}
+
+    class FakeAsyncClient:
+        def __init__(self, timeout, **kwargs):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, headers=None, json=None, **kwargs):
+            calls.append((url, headers or {}, json or {}))
+            if len(calls) <= 6:
+                raise OSError("temporary pushplus network failure")
+            return FakeResponse()
+
+    monkeypatch.setattr("imgclean_web.app.httpx.AsyncClient", FakeAsyncClient)
+    client = _client(tmp_path, monkeypatch)
+    client.post(
+        "/api/airtap/posts/publish",
+        headers={"x-airtap-secret": "relay-secret"},
+        json={
+            "scope": "x-hourly-wechat",
+            "channels": ["xiaohongshu"],
+            "posts": [
+                {
+                    "id": "tweet-hourly-task-retry-1",
+                    "author_handle": "ArtofSpecuycky",
+                    "text": "下周重点关注这几个财报。",
+                    "url": "https://x.com/ArtofSpecuycky/status/2061018073185091633",
+                }
+            ],
+        },
+    )
+
+    first = client.get("/api/airtap/xhs/dispatch", headers={"x-airtap-secret": "relay-secret"})
+    second = client.get("/api/airtap/xhs/dispatch", headers={"x-airtap-secret": "relay-secret"})
+    third = client.get("/api/airtap/xhs/dispatch", headers={"x-airtap-secret": "relay-secret"})
+
+    assert first.status_code == 200
+    assert first.json()["approval_push"]["ok"] is False
+    assert first.json()["airtap"]["reason"] == "approval_push_failed"
+    assert second.status_code == 200
+    assert second.json()["approval_push"]["ok"] is True
+    assert second.json()["approval"]["retried"] is True
+    assert second.json()["approval_push"]["endpoint"] == "https://www.pushplus.plus/send"
+    assert third.status_code == 200
+    assert third.json()["airtap"]["reason"] == "already_dispatched"
+    assert len(calls) == 7
+
+
+def test_airtap_xhs_dispatch_fail_on_push_error_surfaces_to_scheduler(tmp_path, monkeypatch):
+    monkeypatch.setenv("PUSHPLUS_TOKEN", "push-token")
+    monkeypatch.setenv("IMGCLEAN_SESSION_SECRET", "session-secret")
+    async def fake_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr("imgclean_web.app.asyncio.sleep", fake_sleep)
+
+    class FakeAsyncClient:
+        def __init__(self, timeout, **kwargs):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, headers=None, json=None, **kwargs):
+            raise OSError("pushplus unavailable")
+
+    monkeypatch.setattr("imgclean_web.app.httpx.AsyncClient", FakeAsyncClient)
+    client = _client(tmp_path, monkeypatch)
+    client.post(
+        "/api/airtap/posts/publish",
+        headers={"x-airtap-secret": "relay-secret"},
+        json={
+            "scope": "x-hourly-wechat",
+            "channels": ["xiaohongshu"],
+            "posts": [{"id": "tweet-hourly-task-fail-1", "author_handle": "ArtofSpecuycky", "text": "财报观察。"}],
+        },
+    )
+
+    dispatch = client.get(
+        "/api/airtap/xhs/dispatch?fail_on_push_error=true",
+        headers={"x-airtap-secret": "relay-secret"},
+    )
+
+    assert dispatch.status_code == 502
+    assert dispatch.json()["detail"] == "Xiaohongshu approval PushPlus delivery failed."
+
+
 def test_airtap_xhs_confirmation_endpoint_creates_publish_task(tmp_path, monkeypatch):
     monkeypatch.setenv("PUSHPLUS_TOKEN", "push-token")
     monkeypatch.setenv("IMGCLEAN_SESSION_SECRET", "session-secret")
